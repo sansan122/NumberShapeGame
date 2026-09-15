@@ -51,13 +51,18 @@ floors:
 
 # ---------- 节点类型 ----------
 # weight 是出现权重，数字越大越常见（不是百分比，是相对比例）
+#
+# icon 必须用「微软雅黑一定支持」的符号！
+# 实测 ⚔ ⌂ ◈ ▣ ♦ ♥ ♠ ♣ 在 msyh.ttc 里会渲染成豆腐块（□）。
+# 可安全使用的：◆ ★ ✕ ◇ ○ ● ■ ▲ × ÷ ∑ √ ∞
+# 这里特意选了数学符号，和《数与形》的主题一致。
 node_types:
 
   - id: battle
     name: 普通战斗
     weight: 45
     desc: 常规敌人，掉落卡牌与形值
-    icon: "⚔"
+    icon: "×"
 
   - id: elite
     name: 精英战斗
@@ -69,13 +74,13 @@ node_types:
     name: 休整点
     weight: 12
     desc: 回复生命或强化一张卡
-    icon: "⌂"
+    icon: "="
 
   - id: shop
     name: 商店
     weight: 8
     desc: 用金币购买卡牌、遗物或移除卡牌
-    icon: "◈"
+    icon: "√"
 
   - id: event
     name: 事件
@@ -87,7 +92,7 @@ node_types:
     name: 宝箱
     weight: 8
     desc: 直接获得一件遗物
-    icon: "▣"
+    icon: "∑"
 
 # ---------- 路线代价（本作差异化机制）----------
 # 玩家选择带代价标签的边时，需要支付对应代价

@@ -83,7 +83,11 @@ def generate_floor(floor, node_types, cost_pool, rng):
             x = (c + 1) / (count + 1)
 
             # 决定节点类型
-            if r == rows - 1:
+            if r == 0:
+                # 起点固定为普通战斗：一上来就遇精英太难
+                ntype = {"id": "battle", "name": "普通战斗", "icon": "×",
+                         "desc": "常规敌人，掉落卡牌与形值"}
+            elif r == rows - 1:
                 ntype = {"id": "boss", "name": "层主", "icon": "★", "desc": "本层最终战"}
             elif r % 5 == 4:
                 # 每 5 行放一个特殊节点（休整/商店/事件）
@@ -122,7 +126,16 @@ def generate_floor(floor, node_types, cost_pool, rng):
             # 用位置比例决定连谁，保证线不交叉太多
             ux = nodes[uid]["x"]
             candidates = sorted(lower, key=lambda nid: abs(nodes[nid]["x"] - ux))
-            link_count = 1 if rng.random() < 0.3 else 2
+
+            # 起始行（只有一个节点）必须连到下一行所有节点，
+            # 否则开局只有一条路，玩家没有选择余地。
+            if r == 0:
+                link_count = len(candidates)
+            else:
+                # 中间行：连 1~2 个，保证有分岔但又不会太乱
+                link_count = min(len(candidates),
+                                 2 if rng.random() > 0.3 else 1)
+
             targets = candidates[:link_count]
 
             for tid in targets:
