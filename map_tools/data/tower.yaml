@@ -1,0 +1,126 @@
+# ============================================================
+# 《数与形》三层塔地图配置
+# ------------------------------------------------------------
+# 这份文件定义了三层塔的骨架。
+# 想改数值，直接改这里的数字，然后重新运行 tools/build_map.py 即可。
+# 不需要懂编程，只要注意两点：
+#   1. 缩进用空格，不要用 Tab
+#   2. 冒号后面要有一个空格，例如「name: 数之庭」
+# ============================================================
+
+tower:
+  name: 公理塔
+  total_floors: 3
+
+# ---------- 三层塔定义 ----------
+# stage 对应三个学段：小学 -> 初中低段 -> 初中
+floors:
+
+  - id: 1
+    name: 塔基 · 数之庭
+    stage: 数与运算
+    grade: 小学
+    rows: 12              # 本层节点行数（策划案要求 12–18）
+    width: 4              # 每行最多几个节点
+    boss: 正方体·三阶
+    boss_hp: 260
+    theme_color: "#378ADD"
+    desc: 加减乘除与口算的起点，敌人多由具体数字构成
+
+  - id: 2
+    name: 塔身 · 形之廊
+    stage: 图形与几何
+    grade: 初中低段
+    rows: 14
+    width: 4
+    boss: 方程组·三元
+    boss_hp: 270
+    theme_color: "#1D9E75"
+    desc: 面积、周长、角度，敌人以多边形与坐标网格呈现
+
+  - id: 3
+    name: 塔冠 · 方程之顶
+    stage: 方程与代数
+    grade: 初中
+    rows: 16
+    width: 3
+    boss: 不可解之影
+    boss_hp: 300
+    theme_color: "#7F77DD"
+    desc: 未知数与等式变换，最终面对公理断裂的源头
+
+# ---------- 节点类型 ----------
+# weight 是出现权重，数字越大越常见（不是百分比，是相对比例）
+node_types:
+
+  - id: battle
+    name: 普通战斗
+    weight: 45
+    desc: 常规敌人，掉落卡牌与形值
+    icon: "⚔"
+
+  - id: elite
+    name: 精英战斗
+    weight: 15
+    desc: 阶段化敌人，掉落遗物
+    icon: "◆"
+
+  - id: rest
+    name: 休整点
+    weight: 12
+    desc: 回复生命或强化一张卡
+    icon: "⌂"
+
+  - id: shop
+    name: 商店
+    weight: 8
+    desc: 用金币购买卡牌、遗物或移除卡牌
+    icon: "◈"
+
+  - id: event
+    name: 事件
+    weight: 12
+    desc: 三选一抉择，附带世界观文本
+    icon: "?"
+
+  - id: treasure
+    name: 宝箱
+    weight: 8
+    desc: 直接获得一件遗物
+    icon: "▣"
+
+# ---------- 路线代价（本作差异化机制）----------
+# 玩家选择带代价标签的边时，需要支付对应代价
+# 命名规范：全部使用数学概念，让惩罚同时成为记忆强化
+path_costs:
+
+  - id: approximate
+    name: 取近似
+    desc: 跳过 2 个节点，但失去 8 点最大生命
+    math_note: 四舍五入求省事，必然丢精度
+    effect:
+      skip_nodes: 2
+      max_hp_delta: -8
+
+  - id: open_interval
+    name: 开区间
+    desc: 下一个节点必为精英，但战后额外获得 1 次强化
+    math_note: 开区间端点取不到，边界风险实打实
+    effect:
+      force_elite_next: true
+      extra_upgrade: 1
+
+  - id: unproven
+    name: 未完待证
+    desc: 目标节点类型不可见
+    math_note: 条件未证，结论未知
+    effect:
+      hide_next_node: true
+
+  - id: liability
+    name: 负债增量
+    desc: 获得 1 件随机遗物，但本层所有敌人血量 +15%
+    math_note: 借来的量，迟早连本带利还
+    effect:
+      grant_relic: 1
+      enemy_hp_multiplier: 1.15
