@@ -104,16 +104,57 @@ class MapScene:
             self.F_TINY = pygame.font.Font(None, 13)
             self.F_ICON = pygame.font.Font(None, 22)
 
-        # 玩家状态
+        # 玩家状态（如果外部注入了共享的 Player 对象，就用它的数据）
+        self.player = None          # 由 main.Game 注入
+        self._max_hp = 80
+        self._hp = 80
+        self._gold = 50
+        self._relics = []
         self.log = []
-        self.max_hp = 80
-        self.hp = 80
-        self.relics = []
-        self.gold = 50
         self.hide_next = False      # 「未完待证」效果
         self.enemy_hp_mult = 1.0    # 「负债增量」效果
 
         self.load_floor(floor_index)
+
+    # ==================== 玩家状态代理 ====================
+    # 如果 main.Game 注入了共享的 Player，就读写它；否则退回本地字段。
+    # 这样地图单独运行时也能跑（2_run_map.bat）。
+    @property
+    def max_hp(self):
+        return self.player.max_hp if self.player else self._max_hp
+
+    @max_hp.setter
+    def max_hp(self, v):
+        if self.player:
+            self.player.max_hp = v
+        else:
+            self._max_hp = v
+
+    @property
+    def hp(self):
+        return self.player.hp if self.player else self._hp
+
+    @hp.setter
+    def hp(self, v):
+        if self.player:
+            self.player.hp = v
+        else:
+            self._hp = v
+
+    @property
+    def gold(self):
+        return self.player.gold if self.player else self._gold
+
+    @gold.setter
+    def gold(self, v):
+        if self.player:
+            self.player.gold = v
+        else:
+            self._gold = v
+
+    @property
+    def relics(self):
+        return self.player.relics if self.player else self._relics
 
     # ==================== 层与节点 ====================
     def load_floor(self, idx):
@@ -250,11 +291,13 @@ class MapScene:
             self.hp = min(self.hp, self.max_hp)
         elif cid == "liability":
             self.enemy_hp_mult *= 1.15
-            self.relics.append("随机遗物（占位）")
+            self.push_log("本层敌人生命 +15%")
         elif cid == "unproven":
             self.hide_next = True
+            self.push_log("下一层节点类型不可见")
         elif cid == "open_interval":
-            pass  # 由后续战斗处理
+            self.force_elite_next = True
+            self.push_log("下一个节点必为精英")
 
     # ==================== 相机 ====================
     def camera_for(self, node, anchor=0.62):
