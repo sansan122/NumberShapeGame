@@ -480,7 +480,24 @@ class MapScene:
         pygame.draw.rect(screen, PANEL_LINE, box, 1, border_radius=12)
 
         y = box.y + 14
-        screen.blit(self.F_SML.render("演算者", True, TEXT_MUTE), (box.x + 14, y))
+        # 角色名从玩家状态读，别再写死 —— 选了构形师却显示「演算者」会很怪
+        who, who_col, who_icon = "演算者", TEXT_MUTE, ""
+        if self.player is not None:
+            ch = getattr(self.player, "char", None)
+            if ch:
+                who = "%s · %s" % (ch["name"], ch["title"])
+                who_col = tuple(ch["color"])
+                who_icon = ch["icon"]
+        if who_icon:
+            # 头像占位：主题色的小方框 + 角色符号
+            pip = pygame.Rect(box.x + 12, y - 2, 22, 22)
+            pygame.draw.rect(screen, who_col, pip, 2, border_radius=5)
+            ic = self.F_TINY.render(who_icon, True, who_col)
+            screen.blit(ic, ic.get_rect(center=pip.center))
+            screen.blit(self.F_SML.render(who, True, TEXT_MUTE),
+                        (pip.right + 7, y))
+        else:
+            screen.blit(self.F_SML.render(who, True, who_col), (box.x + 14, y))
         y += 24
 
         # 血条

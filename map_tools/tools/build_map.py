@@ -31,6 +31,68 @@ OUT = ROOT / "out"
 DEFAULT_SEED = 20260915
 
 
+def build_in_memory(seed=None):
+    """生成一整座塔的地图，直接返回 dict，**不落盘**。
+
+    给游戏主程序用：每次开新一局就调一次，这样每局的节点布局
+    都不一样（而不是反复读同一个 map.json）。
+
+    seed=None  -> 用系统随机源，每局都不同
+    seed=数字  -> 用指定种子，可复现（存档靠这个）
+    """
+    cfg = load_config()
+
+    # 关键：先把种子定下来，**再用它建 rng**。
+    # 以前写成 `rng = random.Random(seed)` + `used_seed = rng.randint(...)`，
+    # 结果 seed=None 时：rng 是用系统熵播种的，而 used_seed 只是
+    # 「这个 rng 的第一次抽样」—— 两者毫无关系。
+    # 表现就是**报告出来的种子复现不出这张地图**，
+    # 存档记的 seed 是假的 → 读档后地图变了。
+    if seed is None:
+        seed = random.SystemRandom().randint(1, 999999999)
+    rng = random.Random(seed)
+
+    result = {
+        "tower_name": cfg["tower"]["name"],
+        "seed": seed,
+        "floors": [],
+    }
+
+    for floor in cfg["floors"]:
+        nodes, edges = generate_floor(
+            floor, cfg["node_types"], cfg["path_costs"], rng
+        )
+        cost_edges = [e for e in edges if e["cost"]]
+
+        type_names = {}
+        for n in nodes:
+            type_names[n["type_name"]] = type_names.get(n["type_name"], 0) + 1
+
+        result["floors"].append({
+            "id": floor["id"],
+            "name": floor["name"],
+            "stage": floor["stage"],
+            "grade": floor["grade"],
+            "desc": floor["desc"],
+            "boss": floor["boss"],
+            "boss_hp": floor["boss_hp"],
+            "theme_color": floor["theme_color"],
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "cost_edge_count": len(cost_edges),
+                "battle_count": sum(1 for n in nodes if n["type"] == "battle"),
+                "elite_count": sum(1 for n in nodes if n["type"] == "elite"),
+                "rest_count": sum(1 for n in nodes if n["type"] == "rest"),
+                "by_type": type_names,
+            },
+        })
+
+    return result
+
+
 def load_config():
     """读取 tower.yaml 配置文件。"""
     if not DATA.exists():
@@ -457,62 +519,25 @@ def generate_floor(floor, node_types, cost_pool, rng):
 
 
 def build(seed=None):
-    """主流程：读配置 -> 生成三层地图 -> 写出结果。
+    """命令行主流程：生成三层地图 -> 写出 out/map.json。
+
+    生成逻辑全在 build_in_memory() 里，这里只负责打印 + 落盘，
+    免得两处各写一遍、改一处忘了另一处。
 
     seed=None 时用系统随机源（每次都不一样）；
     传具体数字则结果可复现。
     """
-    cfg = load_config()
-    rng = random.Random(seed)
+    result = build_in_memory(seed=seed)
     OUT.mkdir(exist_ok=True)
 
-    # 记下真正用的种子：用户传了就用用户的，没传就是随机的那个
-    used_seed = seed if seed is not None else rng.randint(1, 999999999)
-
-    result = {
-        "tower_name": cfg["tower"]["name"],
-        "seed": used_seed,
-        "floors": [],
-    }
-
-    for floor in cfg["floors"]:
-        print(f"  正在生成第 {floor['id']} 层：{floor['name']} ...")
-        nodes, edges = generate_floor(
-            floor, cfg["node_types"], cfg["path_costs"], rng
-        )
-        cost_edges = [e for e in edges if e["cost"]]
-
-        # 统计各种节点各有多少个
-        type_names = {}
-        for n in nodes:
-            type_names[n["type_name"]] = type_names.get(n["type_name"], 0) + 1
-
-        result["floors"].append({
-            "id": floor["id"],
-            "name": floor["name"],
-            "stage": floor["stage"],
-            "grade": floor["grade"],
-            "desc": floor["desc"],
-            "boss": floor["boss"],
-            "boss_hp": floor["boss_hp"],
-            "theme_color": floor["theme_color"],
-            "nodes": nodes,
-            "edges": edges,
-            "stats": {
-                "node_count": len(nodes),
-                "edge_count": len(edges),
-                "cost_edge_count": len(cost_edges),
-                "battle_count": sum(1 for n in nodes if n["type"] == "battle"),
-                "elite_count": sum(1 for n in nodes if n["type"] == "elite"),
-                "rest_count": sum(1 for n in nodes if n["type"] == "rest"),
-                "by_type": type_names,
-            },
-        })
-        s = result["floors"][-1]["stats"]
+    for fl in result["floors"]:
+        s = fl["stats"]
+        print(f"  第 {fl['id']} 层：{fl['name']} ...")
         print(f"    节点 {s['node_count']} 个｜连边 {s['edge_count']} 条"
               f"｜其中带代价 {s['cost_edge_count']} 条")
         # 把各类型数量也打出来，方便一眼看出分布是否合理
-        dist = "  ".join("%s %d" % (k, v) for k, v in sorted(type_names.items()))
+        dist = "  ".join("%s %d" % (k, v)
+                         for k, v in sorted(s["by_type"].items()))
         print(f"    分布：{dist}")
 
     # ---- 写出 JSON（给程序用）----
@@ -520,7 +545,7 @@ def build(seed=None):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"\n已生成：{json_path}")
-    print(f"随机种子：{used_seed}")
+    print(f"随机种子：{result['seed']}")
 
     return result
 

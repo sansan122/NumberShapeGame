@@ -24,10 +24,15 @@ import pygame
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+# 地图生成器放在 map_tools/tools/ 下，加进搜索路径才能 import
+sys.path.insert(0, str(ROOT / "map_tools" / "tools"))
 
 import map_scene as M            # noqa: E402
 import node_scenes as NS         # noqa: E402
 import save_system               # noqa: E402
+import player as P               # noqa: E402
+import ui_scenes as UI           # noqa: E402
+import build_map as B            # noqa: E402
 from player import Player        # noqa: E402
 from battle_scene import BattleScene, ENEMY_KINDS   # noqa: E402
 
@@ -46,24 +51,22 @@ TYPE_ICON = {
 class Game:
     """顶层状态机：map / node / battle。"""
 
-    def __init__(self, save_data=None):
+    def __init__(self, save_data=None, char=None):
         """
         save_data=None  -> 开一局新的
         save_data=dict  -> 从存档接着玩（用 save_system.build_game_data 造出来）
+        char=dict       -> 本局用哪个角色（player.CHARACTERS 里的一项）
         """
         self.save_mgr = save_system.SaveManager()
         self.floor_stats = {}       # 每层战绩：{"1": {"battle": 3, "win": 3}}
 
-        try:
-            base_map = M.load_map()
-        except FileNotFoundError as e:
-            print(e)
-            raise
-
         if save_data:
+            # 读档：地图直接用存档里的（种子复现），不再现算
+            base_map = save_data.get("map_data") or self._fresh_map()
             self._init_from_save(save_data, base_map)
         else:
-            self._init_new(base_map)
+            # 新的一局：**每次现生成一张新地图**，所以每局的节点布局都不同
+            self._init_new(self._fresh_map(), char)
 
         self.mode = "map"        # map / node / battle / dead
         self.panel = None
@@ -82,12 +85,29 @@ class Game:
         }
 
     # ---------- 两种开局 ----------
-    def _init_new(self, base_map):
-        self.player = Player(max_hp=80, gold=60)
+    @staticmethod
+    def _fresh_map():
+        """现生成一张新地图（不落盘）。
+
+        以前这里读的是 map_tools/out/map.json —— 那个文件是**静态的**，
+        所以每次运行游戏看到的节点布局完全一样，用户反馈过
+        「不管运行几次都是一样的」。改成现场生成后，
+        每开一局都是一张新图；而存档里带了 seed，
+        读档时用同一个 seed 重新生成，照样能精确复现。
+        """
+        try:
+            return B.build_in_memory()
+        except FileNotFoundError:
+            # 配置读不到时退回磁盘上的旧地图，至少能进游戏
+            return M.load_map()
+
+    def _init_new(self, base_map, char=None):
+        self.player = Player(char=char)
         self.map = M.MapScene(base_map)
         self.map.player = self.player
         self.map.cam_y = self.map.camera_for(self.map.nodes[self.map.current])
         self.map.cam_target = self.map.cam_y
+        self.map.push_log("种子 %d" % base_map.get("seed", 0))
 
     def _init_from_save(self, save_data, base_map):
         """从存档恢复。地图种子对得上就完全复现，对不上就只恢复玩家。"""
@@ -346,8 +366,22 @@ class Game:
         pygame.draw.rect(screen, M.PANEL_LINE, box, 1, border_radius=12)
 
         y = box.y + 12
-        screen.blit(self.F_SML.render("演算者", True, M.TEXT_MUTE),
-                    (box.x + 14, y))
+        # 角色名从玩家状态读，别写死 —— 选了构形师却显示「演算者」会很怪。
+        # （这是 main.py 自己画的面板，会盖掉 map_scene 里那版，两处都要改）
+        ch = getattr(p, "char", None)
+        who = "%s · %s" % (ch["name"], ch["title"]) if ch else "演算者"
+        if ch:
+            # 头像占位：主题色方框 + 角色符号
+            pip = pygame.Rect(box.x + 12, y - 1, 22, 22)
+            pygame.draw.rect(screen, tuple(ch["color"]), pip, 2,
+                             border_radius=5)
+            ic = self.F_TINY.render(ch["icon"], True, tuple(ch["color"]))
+            screen.blit(ic, ic.get_rect(center=pip.center))
+            screen.blit(self.F_SML.render(who, True, M.TEXT_MUTE),
+                        (pip.right + 7, y))
+        else:
+            screen.blit(self.F_SML.render(who, True, M.TEXT_MUTE),
+                        (box.x + 14, y))
         y += 24
 
         bar = pygame.Rect(box.x + 14, y, box.w - 28, 14)
@@ -417,9 +451,9 @@ class Game:
         msg = self.F_MID.render("演算者倒下了", True, (200, 70, 70))
         screen.blit(msg, msg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 50)))
 
-        tips = "按 R 重新开始　·　ESC 退出"
+        tips = "按 R 重新开始　·　M 回主菜单　·　ESC 退出"
         if self.has_save():
-            tips = "按 L 读档回到存档点　·　R 重新开始　·　ESC 退出"
+            tips = "按 L 读档回到存档点　·　R 重新开始　·　M 主菜单　·　ESC 退出"
         sub = self.F_SML.render(tips, True, M.TEXT_MUTE)
         screen.blit(sub, sub.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 10)))
 
@@ -429,17 +463,32 @@ class Game:
 
 
 def main():
+    """主循环。
+
+    场景流转：
+        主菜单 ──「开始」──> 选角色 ──「出发」──> 过渡 ──> 爬塔地图
+           │                    │
+           └─「继续」读档 ───────┴────────────────────────> 爬塔地图
+    """
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption("数与形 · 公理塔")
     clock = pygame.time.Clock()
 
-    try:
-        game = Game()
-    except FileNotFoundError:
-        print("\n请先运行 2_gen_map.bat 生成地图。")
-        input("按回车退出...")
-        return
+    # 用一个「探针」拿到存档信息给主菜单显示（不真正开局，
+    # 免得光看菜单就生成一张图）
+    probe_mgr = save_system.SaveManager()
+    has_save = probe_mgr.exists()
+    save_info = ""
+    if has_save:
+        info = probe_mgr.info()
+        if info:
+            save_info = "%s　第 %d 层　生命 %d/%d" % (
+                info["saved_at"], info["floor_index"] + 1,
+                info["hp"], info["max_hp"])
+
+    scene = UI.MenuScene(has_save=has_save, save_info=save_info)
+    game = None                 # 正式开局后才建
 
     running = True
     while running:
@@ -447,21 +496,66 @@ def main():
         mouse = pygame.mouse.get_pos()
         t_ms = pygame.time.get_ticks()
 
+        # 当前这一帧要画谁：有 game 就画游戏，否则画 UI 场景
+        active = game if game is not None else scene
+
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
                 break
 
-            # 死亡画面
+            # ---------- UI 场景（主菜单 / 选角色 / 过渡）----------
+            if game is None:
+                r = scene.handle(ev, mouse)
+
+                if r == "quit":
+                    running = False
+                    break
+
+                if isinstance(r, tuple) and r[0] == "pick":
+                    # 选定角色 -> 走过渡，再开新局
+                    scene = UI.LoadingScene(r[1])
+                    continue
+
+                if r == "new":
+                    scene = UI.CharSelectScene()
+                    continue
+
+                if r == "load":
+                    ng = _load_from_disk()
+                    if ng is None:
+                        # 存档坏了：留在菜单，把原因显示出来
+                        scene = UI.MenuScene(
+                            has_save=False,
+                            save_info="")
+                        print("[读档失败] %s" % probe_mgr.last_error)
+                    else:
+                        game = ng
+                    continue
+
+                if r == "back":
+                    # 从选角色退回主菜单时，重新读一遍存档状态
+                    has_save = probe_mgr.exists()
+                    scene = UI.MenuScene(has_save=has_save,
+                                         save_info=_save_line())
+                    continue
+
+                continue    # 场景内部的小动作（切换选中等）
+
+            # ---------- 正式游戏 ----------
             if game.mode == "dead":
                 if ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_r:
-                        game = Game()
-                        game.save_mgr.delete()
+                        game = None
+                        scene = UI.CharSelectScene()
                     elif ev.key == pygame.K_l:
                         ng = game.load_game()
                         if ng is not None:
                             game = ng
+                    elif ev.key == pygame.K_m:
+                        game = None
+                        scene = UI.MenuScene(has_save=probe_mgr.exists(),
+                                             save_info=_save_line())
                     elif ev.key == pygame.K_ESCAPE:
                         running = False
                 continue
@@ -475,12 +569,54 @@ def main():
                 game = r[1]
                 continue
 
-        game.update(dt)
-        game.draw(screen, mouse, t_ms)
+        if not running:
+            break
+
+        # 过渡场景自己倒数，到点就真的开一局
+        if game is None:
+            r = scene.update(dt)
+            if r == "done":
+                try:
+                    game = Game(char=scene.char)
+                except FileNotFoundError:
+                    print("\n找不到地图配置，请先运行 2_gen_map.bat。")
+                    input("按回车退出...")
+                    break
+                scene = None
+                continue
+        else:
+            game.update(dt)
+
+        active.draw(screen, mouse, t_ms)
         pygame.display.flip()
 
     pygame.quit()
     sys.exit()
+
+
+def _save_line():
+    """主菜单要显示的一行存档摘要（没有存档就返回空串）。"""
+    mgr = save_system.SaveManager()
+    info = mgr.info()
+    if not info:
+        return ""
+    return "%s　第 %d 层　生命 %d/%d" % (
+        info["saved_at"], info["floor_index"] + 1,
+        info["hp"], info["max_hp"])
+
+
+def _load_from_disk():
+    """从磁盘读档并造一局新的。失败返回 None。"""
+    mgr = save_system.SaveManager()
+    data = mgr.load()
+    if data is None:
+        return None
+    try:
+        built = save_system.build_game_data(data)
+        return Game(save_data=built)
+    except Exception as e:                  # noqa: BLE001
+        print("[读档失败] 存档内容有问题：%s" % e)
+        return None
 
 
 if __name__ == "__main__":

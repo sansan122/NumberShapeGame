@@ -182,16 +182,16 @@ def build_game_data(save, map_data=None):
     p = Player.from_dict(save["player"])
 
     seed_saved = save.get("seed")
-    seed_now = (map_data or {}).get("seed")
 
     if map_data is None:
-        # 没传 map 数据就自己去加载一份
-        try:
-            map_data = M.load_map()
-            seed_now = map_data.get("seed")
-        except FileNotFoundError:
-            map_data = None
+        # 没传 map 数据就自己按**存档里的种子**重新生成一张。
+        # 注意：这里以前是 M.load_map() 读 out/map.json —— 那个文件是静态的，
+        # 游戏改成「每局现生成地图」之后就读不回来了，
+        # 表现为读档后地图变回默认那张（seed 20260915），角色状态在、
+        # 但站位和路线全对不上。必须按 seed 重生。
+        map_data = _regenerate_map(seed_saved)
 
+    seed_now = (map_data or {}).get("seed")
     seed_ok = (seed_saved is not None and seed_saved == seed_now)
 
     return {
@@ -204,3 +204,25 @@ def build_game_data(save, map_data=None):
         "map_effects": save.get("map_effects", {}),
         "floor_stats": save.get("floor_stats", {}),
     }
+
+
+def _regenerate_map(seed):
+    """按种子重新生成一张地图（读档用）。
+
+    拿不到生成器（比如 map_tools 不见了）就退回磁盘上的 map.json，
+    至少不会因为读档而崩掉。
+    """
+    if seed is None:
+        return _load_static_map()
+    try:
+        import build_map as B
+        return B.build_in_memory(seed=seed)
+    except Exception:                       # noqa: BLE001
+        return _load_static_map()
+
+
+def _load_static_map():
+    try:
+        return M.load_map()
+    except FileNotFoundError:
+        return None
