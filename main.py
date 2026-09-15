@@ -7,7 +7,12 @@
       └─ 点节点 ──> 战斗 / 休整 / 商店 / 事件 / 宝箱
                       └─ 结束 ──> 回到地图
 
-按 M 可以随时看地图全景，ESC 返回上一层 / 退出。
+按键：
+    滚轮 / ↑↓   滚动地图
+    左键        进入高亮节点（远处节点 = 预览路径）
+    S           存档
+    L           读档
+    ESC         退出
 
 运行：双击 3_run_game.bat
 """
@@ -22,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 import map_scene as M            # noqa: E402
 import node_scenes as NS         # noqa: E402
+import save_system               # noqa: E402
 from player import Player        # noqa: E402
 from battle_scene import BattleScene, ENEMY_KINDS   # noqa: E402
 
@@ -40,21 +46,26 @@ TYPE_ICON = {
 class Game:
     """顶层状态机：map / node / battle。"""
 
-    def __init__(self):
-        self.player = Player(max_hp=80, gold=60)
+    def __init__(self, save_data=None):
+        """
+        save_data=None  -> 开一局新的
+        save_data=dict  -> 从存档接着玩（用 save_system.build_game_data 造出来）
+        """
+        self.save_mgr = save_system.SaveManager()
+        self.floor_stats = {}       # 每层战绩：{"1": {"battle": 3, "win": 3}}
 
         try:
-            data = M.load_map()
+            base_map = M.load_map()
         except FileNotFoundError as e:
             print(e)
             raise
 
-        self.map = M.MapScene(data)
-        self.map.player = self.player          # 让地图读到共享状态
-        self.map.cam_y = self.map.camera_for(self.map.nodes[self.map.current])
-        self.map.cam_target = self.map.cam_y
+        if save_data:
+            self._init_from_save(save_data, base_map)
+        else:
+            self._init_new(base_map)
 
-        self.mode = "map"        # map / node / battle
+        self.mode = "map"        # map / node / battle / dead
         self.panel = None
         self.battle = None
         self.msg = ""
@@ -69,6 +80,51 @@ class Game:
             "BIG": pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 30),
             "MID": self.F_MID, "SML": self.F_SML, "TINY": self.F_TINY,
         }
+
+    # ---------- 两种开局 ----------
+    def _init_new(self, base_map):
+        self.player = Player(max_hp=80, gold=60)
+        self.map = M.MapScene(base_map)
+        self.map.player = self.player
+        self.map.cam_y = self.map.camera_for(self.map.nodes[self.map.current])
+        self.map.cam_target = self.map.cam_y
+
+    def _init_from_save(self, save_data, base_map):
+        """从存档恢复。地图种子对得上就完全复现，对不上就只恢复玩家。"""
+        self.player = save_data["player"]
+
+        md = save_data.get("map_data") or base_map
+        floor_index = save_data.get("floor_index", 0)
+        # 楼层越界保护：存档是三层塔时代的，现在塔层数变了
+        floor_index = max(0, min(floor_index, len(md["floors"]) - 1))
+
+        self.map = M.MapScene(md, floor_index=floor_index)
+        self.map.player = self.player
+
+        # 恢复地图副作用
+        fx = save_data.get("map_effects", {})
+        self.map.hide_next = fx.get("hide_next", False)
+        self.map.enemy_hp_mult = fx.get("enemy_hp_mult", 1.0)
+        self.map.force_elite_next = fx.get("force_elite_next", False)
+
+        # 恢复站位（节点 id 每层都是局部的，必须和当前层一起理解）
+        cur = save_data.get("current")
+        if cur is not None and cur in self.map.nodes:
+            self.map.current = cur
+        vis = set(save_data.get("visited", []))
+        vis = {v for v in vis if v in self.map.nodes}
+        vis.add(self.map.current)
+        self.map.visited = vis
+
+        self.map.cam_y = self.map.camera_for(self.map.nodes[self.map.current])
+        self.map.cam_target = self.map.cam_y
+
+        self.floor_stats = dict(save_data.get("floor_stats") or {})
+
+        if save_data.get("seed_ok"):
+            self.map.push_log("读档成功，接着爬")
+        else:
+            self.map.push_log("读档：地图已重新生成，只恢复了状态")
 
     # ==================== 节点派发 ====================
     def enter_node(self, node):
@@ -118,9 +174,55 @@ class Game:
             self.map.cam_y = self.map.camera_for(
                 self.map.nodes[self.map.current])
             self.map.cam_target = self.map.cam_y
+            # 换层时自动存一次：这是最自然的存档点
+            self.auto_save()
         else:
             self.mode = "map"
-            self.flash("公理塔已到顶 —— 全剧终")
+            self.flash("公理塔已到顶 —— 全剧终", 8)
+            # 通关了就把存档清掉，免得下次一进来就是「已通关」状态
+            self.save_mgr.delete()
+
+    # ==================== 存档 / 读档 ====================
+    def save_game(self, quiet=False):
+        if self.mode == "battle":
+            self.flash("战斗中不能存档")
+            return False
+        ok = self.save_mgr.save(self)
+        if not quiet:
+            if ok:
+                self.flash("已存档")
+            else:
+                self.flash("存档失败：%s" % self.save_mgr.last_error)
+        return ok
+
+    def auto_save(self):
+        """静默存档，不弹提示。"""
+        return self.save_game(quiet=True)
+
+    def load_game(self):
+        """读档并重建整局。返回新的 Game 或 None。"""
+        data = self.save_mgr.load()
+        if data is None:
+            self.flash("读档失败：%s" % self.save_mgr.last_error)
+            return None
+        try:
+            built = save_system.build_game_data(data)
+            return Game(save_data=built)
+        except Exception as e:              # noqa: BLE001
+            self.flash("存档内容有问题：%s" % e)
+            return None
+
+    def has_save(self):
+        return self.save_mgr.exists()
+
+    def save_summary(self):
+        """给提示语用的一句话描述。"""
+        info = self.save_mgr.info()
+        if not info:
+            return "没有存档"
+        return "%s　第 %d 层　生命 %d/%d" % (
+            info["saved_at"], info["floor_index"] + 1,
+            info["hp"], info["max_hp"])
 
     def flash(self, text, secs=2.6):
         self.msg = text
@@ -128,20 +230,35 @@ class Game:
 
     # ==================== 事件 ====================
     def handle(self, event, mouse):
+        """把事件转给当前模式的处理函数。
+
+        注意这里必须 return —— handle_map / handle_node / handle_battle
+        会返回 "quit" 或 ("replace", game) 这类信号，
+        丢掉返回值就等于「按 ESC 不退出、按 L 不换局」。
+        """
         if self.mode == "map":
-            self.handle_map(event, mouse)
-        elif self.mode == "node":
-            self.handle_node(event, mouse)
-        elif self.mode == "battle":
-            self.handle_battle(event, mouse)
+            return self.handle_map(event, mouse)
+        if self.mode == "node":
+            return self.handle_node(event, mouse)
+        if self.mode == "battle":
+            return self.handle_battle(event, mouse)
+        return None
 
     def handle_map(self, event, mouse):
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 return "quit"
+            if event.key == pygame.K_s:
+                self.save_game()
+                return None
+            if event.key == pygame.K_l:
+                ng = self.load_game()
+                if ng is not None:
+                    return ("replace", ng)
+                return None
             if event.key in (pygame.K_UP, pygame.K_w):
                 self.map.scroll(70)
-            elif event.key in (pygame.K_DOWN, pygame.K_s):
+            elif event.key == pygame.K_DOWN:
                 self.map.scroll(-70)
             return None
 
@@ -204,7 +321,7 @@ class Game:
         if self.mode == "map":
             self.map.draw(screen, mouse, t_ms)
             self.draw_player_panel(screen)
-            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　ESC 退出")
+            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　S 存档　L 读档　·　ESC 退出")
         elif self.mode == "node":
             self.panel.draw(screen, mouse, t_ms)
         elif self.mode == "battle":
@@ -217,7 +334,14 @@ class Game:
 
     def draw_player_panel(self, screen):
         """地图上显示的玩家状态（覆盖地图自带的简化版）。"""
-        box = pygame.Rect(20, 76, 210, 176)
+        p = self.player
+        has_save = self.has_save()
+
+        # 面板高度按内容算：多一行「有存档」就高一点，
+        # 否则那行字会画到面板外面去（看起来像和「记录」叠住了）
+        rows = 4 + (1 if has_save else 0)
+        box_h = 12 + 24 + 20 + 24 * 3 + 22 * (rows - 4) + 22 + 6
+        box = pygame.Rect(20, 76, 210, box_h)
         pygame.draw.rect(screen, M.PANEL, box, border_radius=12)
         pygame.draw.rect(screen, M.PANEL_LINE, box, 1, border_radius=12)
 
@@ -228,7 +352,6 @@ class Game:
 
         bar = pygame.Rect(box.x + 14, y, box.w - 28, 14)
         pygame.draw.rect(screen, (238, 236, 230), bar, border_radius=7)
-        p = self.player
         if p.max_hp > 0 and p.hp > 0:
             fw = int(bar.w * p.hp / p.max_hp)
             if fw > 0:
@@ -244,11 +367,17 @@ class Game:
         y += 24
         screen.blit(self.F_SML.render("遗物 %d 件" % len(p.relics), True, M.TEXT_MUTE),
                     (box.x + 14, y))
-        y += 22
+        y += 24
         screen.blit(self.F_SML.render("牌库 %d 张" % len(p.deck), True, M.TEXT_MUTE),
                     (box.x + 14, y))
 
-        # 最近的事件日志
+        # 有存档就在面板底部提示一下，免得玩家忘了
+        if has_save:
+            y += 22
+            screen.blit(self.F_TINY.render("有存档　L 读档", True, M.GOLD),
+                        (box.x + 14, y))
+
+        # 最近的事件日志（紧贴在状态面板下方）
         if p.log_lines:
             ly = box.bottom + 12
             lb = pygame.Rect(20, ly, 250, 150)
@@ -263,6 +392,11 @@ class Game:
                 yy += 19
 
     def draw_hint(self, screen, text):
+        """底部提示。
+        地图自己也会在同一个位置画一行提示，所以先把那条区域
+        盖成背景色，避免两行字叠在一起糊掉。"""
+        strip = pygame.Rect(0, HEIGHT - 36, WIDTH, 36)
+        pygame.draw.rect(screen, M.BG, strip)
         tt = self.F_TINY.render(text, True, M.TEXT_MUTE)
         screen.blit(tt, (24, HEIGHT - 30))
 
@@ -281,9 +415,17 @@ class Game:
     def draw_dead(self, screen):
         screen.fill((246, 245, 240))
         msg = self.F_MID.render("演算者倒下了", True, (200, 70, 70))
-        screen.blit(msg, msg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 30)))
-        sub = self.F_SML.render("按 R 重新开始　·　ESC 退出", True, M.TEXT_MUTE)
-        screen.blit(sub, sub.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 30)))
+        screen.blit(msg, msg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 50)))
+
+        tips = "按 R 重新开始　·　ESC 退出"
+        if self.has_save():
+            tips = "按 L 读档回到存档点　·　R 重新开始　·　ESC 退出"
+        sub = self.F_SML.render(tips, True, M.TEXT_MUTE)
+        screen.blit(sub, sub.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 10)))
+
+        if self.has_save():
+            info = self.F_TINY.render(self.save_summary(), True, M.TEXT_FAINT)
+            screen.blit(info, info.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 46)))
 
 
 def main():
@@ -315,6 +457,11 @@ def main():
                 if ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_r:
                         game = Game()
+                        game.save_mgr.delete()
+                    elif ev.key == pygame.K_l:
+                        ng = game.load_game()
+                        if ng is not None:
+                            game = ng
                     elif ev.key == pygame.K_ESCAPE:
                         running = False
                 continue
@@ -323,6 +470,10 @@ def main():
             if r == "quit":
                 running = False
                 break
+            if isinstance(r, tuple) and r[0] == "replace":
+                # 读档成功：整局换掉，继续跑
+                game = r[1]
+                continue
 
         game.update(dt)
         game.draw(screen, mouse, t_ms)

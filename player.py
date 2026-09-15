@@ -115,12 +115,22 @@ class Player:
 
     @classmethod
     def from_dict(cls, d):
+        """从存档字典还原。
+        这里故意用 .get() 带默认值，不直接下标取 —— 万一存档里
+        某些字段（比如以后新加的）没有，也不会整个读档崩掉。"""
         p = cls.__new__(cls)
-        p.max_hp = d["max_hp"]
-        p.hp = d["hp"]
-        p.gold = d["gold"]
-        p.relics = list(d["relics"])
-        p.deck = [Card(c["name"], c["ctype"], c["value"], c["desc"],
-                       c["cost"], c["effect"]) for c in d["deck"]]
+        p.max_hp = int(d.get("max_hp", 80))
+        p.gold = int(d.get("gold", 60))
+        # 生命要夹在 0..max_hp 之间，防止手改过的存档出现负血 / 超血
+        p.hp = max(0, min(int(d.get("hp", p.max_hp)), p.max_hp))
+        p.relics = list(d.get("relics", []))
+        p.deck = []
+        for c in d.get("deck", []):
+            try:
+                p.deck.append(Card(c["name"], c["ctype"], c["value"],
+                                   c["desc"], c["cost"], c.get("effect")))
+            except (KeyError, TypeError):
+                # 单张卡坏了就跳过，不要为一张卡丢掉整局
+                continue
         p.log_lines = []
         return p

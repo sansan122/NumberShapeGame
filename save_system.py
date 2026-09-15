@@ -1,0 +1,206 @@
+"""
+《数与形》存档 / 读档
+================================================
+把一局爬塔的进度写到一个 JSON 文件里，下次打开接着玩。
+
+存了什么（saves/save.json）：
+    version      存档格式版本号（以后改结构时用来判断能不能读）
+    saved_at     存档时间（给人看的）
+    seed         生成这张地图用的随机种子
+    floor_index  在第几层（0 开始）
+    current      当前站在哪个节点
+    visited      这一层已经走过哪些节点
+    player       生命 / 金币 / 遗物 / 牌库 / 日志
+    map_effects  地图副作用（未完待证、负债增量、强制精英）
+    floor_stats  每层的战绩统计（打了几场、赢了几场）
+
+为什么地图不用整个存下来？
+    因为地图是「种子 -> 地图」的确定性函数：同一个种子跑出来的地图
+    一模一样。所以只要记住 seed，读档时重新生成一遍就行，
+    存档文件能小很多（几十 KB -> 几 KB）。
+
+如果种子对不上（比如玩家中途换了地图）怎么办？
+    会退化成「只恢复玩家状态 + 楼层 + 当前节点」，
+    并在地图上记一条日志说明。至少血和牌不会丢。
+
+怎么用：
+    from save_system import SaveManager
+    sm = SaveManager()
+    sm.save(game)              # 存
+    data = sm.load()           # 读（返回 dict 或 None）
+    sm.delete()                # 删
+"""
+
+import json
+import time
+from pathlib import Path
+
+import map_scene as M
+from player import Player
+
+# 存档格式版本。改了结构就把这个数 +1，
+# 老存档读到版本不对会拒绝加载（而不是崩掉）。
+SAVE_VERSION = 1
+
+# 存档目录：项目根下的 saves/
+ROOT = Path(__file__).resolve().parent
+SAVE_DIR = ROOT / "saves"
+SAVE_FILE = SAVE_DIR / "save.json"
+
+
+class SaveManager:
+    """存档文件的读写。所有方法都不抛异常给上层，
+    失败时返回 False / None，并把原因写在 self.last_error 里。"""
+
+    def __init__(self, path=None):
+        self.path = Path(path) if path else SAVE_FILE
+        self.last_error = ""
+
+    # ==================== 查询 ====================
+    def exists(self):
+        return self.path.exists()
+
+    def info(self):
+        """只读存档头部信息，用来在菜单上显示「第几层 / 什么时间」。
+        不构造 Player，读坏了也不影响主流程。"""
+        data = self._read_raw()
+        if data is None:
+            return None
+        p = data.get("player", {})
+        return {
+            "saved_at": data.get("saved_at", "?"),
+            "floor_index": data.get("floor_index", 0),
+            "floor_name": data.get("floor_name", ""),
+            "hp": p.get("hp", 0),
+            "max_hp": p.get("max_hp", 0),
+            "gold": p.get("gold", 0),
+            "deck_size": len(p.get("deck", [])),
+            "seed": data.get("seed"),
+        }
+
+    # ==================== 写 ====================
+    def save(self, game):
+        """把当前 Game 存下来。成功返回 True。"""
+        self.last_error = ""
+        try:
+            data = self._snapshot(game)
+            # 注意：要建的是「这份存档所在目录」，不是模块级的 SAVE_DIR。
+            # 否则自定义路径的存档（比如测试里的临时文件）会顺带
+            # 在项目根下建一个空的 saves/ 目录。
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # 先写临时文件再改名：万一写到一半断电，
+            # 也不会把原来那份好存档毁掉。
+            tmp = self.path.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp.replace(self.path)
+            return True
+        except Exception as e:              # noqa: BLE001
+            self.last_error = "%s: %s" % (type(e).__name__, e)
+            return False
+
+    def _snapshot(self, game):
+        """从 game 里提取要存的东西。"""
+        mp = game.map
+        return {
+            "version": SAVE_VERSION,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "seed": mp.data.get("seed"),
+            "floor_index": mp.floor_index,
+            "floor_name": mp.floor.get("name", ""),
+            "current": mp.current,
+            "visited": sorted(mp.visited),
+            "player": game.player.to_dict(),
+            "map_effects": {
+                "hide_next": mp.hide_next,
+                "enemy_hp_mult": mp.enemy_hp_mult,
+                "force_elite_next": getattr(mp, "force_elite_next", False),
+            },
+            "floor_stats": getattr(game, "floor_stats", {}),
+        }
+
+    # ==================== 读 ====================
+    def load(self):
+        """读存档，返回 dict（还没变成对象）。
+        存档不存在或版本不对就返回 None。"""
+        self.last_error = ""
+        data = self._read_raw()
+        if data is None:
+            return None
+        if data.get("version") != SAVE_VERSION:
+            self.last_error = ("存档版本 %s，当前程序只认 %d"
+                               % (data.get("version"), SAVE_VERSION))
+            return None
+        return data
+
+    def _read_raw(self):
+        """只做「读文件 + 解析 JSON」这两件事，带错误处理。"""
+        if not self.path.exists():
+            self.last_error = "没有存档"
+            return None
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            # 存档写坏了：改名留档，别直接删，用户可能想看看
+            self.last_error = "存档损坏：%s" % e
+            try:
+                self.path.replace(self.path.with_suffix(".json.bad"))
+            except OSError:
+                pass
+            return None
+        except OSError as e:
+            self.last_error = "读不了存档：%s" % e
+            return None
+
+    # ==================== 删 ====================
+    def delete(self):
+        """通关或重开后清掉存档。"""
+        if self.path.exists():
+            try:
+                self.path.unlink()
+                return True
+            except OSError as e:
+                self.last_error = "删不掉：%s" % e
+                return False
+        return True
+
+
+def build_game_data(save, map_data=None):
+    """
+    把存档 dict 翻译成「造 Game 要用的材料」。
+
+    返回一个 dict：
+        player          已经还原好的 Player
+        floor_index     从第几层开始
+        seed_ok         True = 地图种子对得上，地图是真的同一张
+        map_data        用哪个 map 数据（对不上就用当前 map.json）
+        current/visited 要恢复到哪个节点
+        map_effects     地图副作用
+        floor_stats     战绩
+    """
+    p = Player.from_dict(save["player"])
+
+    seed_saved = save.get("seed")
+    seed_now = (map_data or {}).get("seed")
+
+    if map_data is None:
+        # 没传 map 数据就自己去加载一份
+        try:
+            map_data = M.load_map()
+            seed_now = map_data.get("seed")
+        except FileNotFoundError:
+            map_data = None
+
+    seed_ok = (seed_saved is not None and seed_saved == seed_now)
+
+    return {
+        "player": p,
+        "floor_index": save.get("floor_index", 0),
+        "seed_ok": seed_ok,
+        "map_data": map_data,
+        "current": save.get("current"),
+        "visited": set(save.get("visited", [])),
+        "map_effects": save.get("map_effects", {}),
+        "floor_stats": save.get("floor_stats", {}),
+    }
