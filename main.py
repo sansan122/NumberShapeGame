@@ -22,7 +22,9 @@ from pathlib import Path
 
 import pygame
 
-ROOT = Path(__file__).resolve().parent
+import game_env as E             # 路径与字体的统一入口（见 game_env.py）
+
+ROOT = E.resource_path()          # 打包后指向临时解包目录，别再自己算 __file__
 sys.path.insert(0, str(ROOT))
 # 地图生成器放在 map_tools/tools/ 下，加进搜索路径才能 import
 sys.path.insert(0, str(ROOT / "map_tools" / "tools"))
@@ -37,6 +39,9 @@ from player import Player        # noqa: E402
 from battle_scene import BattleScene, ENEMY_KINDS   # noqa: E402
 
 WIDTH, HEIGHT = 1280, 720
+
+# 窗口标题：发给别人时，任务栏上显示的是这个
+WINDOW_TITLE = "数与形 · 公理塔"
 
 # 战斗类节点
 BATTLE_TYPES = {"battle", "elite", "boss"}
@@ -75,12 +80,12 @@ class Game:
         self.msg_t = 0.0
         self.pending_node = None
 
-        self.F_MID = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 21)
-        self.F_SML = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 16)
-        self.F_TINY = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 14)
+        self.F_MID = E.load_font(21)
+        self.F_SML = E.load_font(16)
+        self.F_TINY = E.load_font(14)
 
         self.fonts = {
-            "BIG": pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 30),
+            "BIG": E.load_font(30),
             "MID": self.F_MID, "SML": self.F_SML, "TINY": self.F_TINY,
         }
 
@@ -462,6 +467,20 @@ class Game:
             screen.blit(info, info.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 46)))
 
 
+def make_window_icon():
+    """画一个窗口/任务栏图标（免安装 exe 没法带资源文件，索性代码画）。
+
+    图案：深蓝底 + 金色「∑」，和主菜单的视觉一致。
+    """
+    size = 64
+    icon = pygame.Surface((size, size), pygame.SRCALPHA)
+    pygame.draw.rect(icon, (24, 95, 165), (0, 0, size, size), border_radius=12)
+    pygame.draw.rect(icon, (196, 148, 30), (0, 0, size, size), 4, border_radius=12)
+    glyph = E.load_font(42).render("∑", True, (250, 249, 245))
+    icon.blit(glyph, glyph.get_rect(center=(size // 2, size // 2 + 2)))
+    return icon
+
+
 def main():
     """主循环。
 
@@ -472,7 +491,8 @@ def main():
     """
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("数与形 · 公理塔")
+    pygame.display.set_caption(WINDOW_TITLE)
+    pygame.display.set_icon(make_window_icon())
     clock = pygame.time.Clock()
 
     # 用一个「探针」拿到存档信息给主菜单显示（不真正开局，

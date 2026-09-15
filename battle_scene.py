@@ -25,6 +25,7 @@ import random
 
 import pygame
 
+import game_env as E
 from player import Card
 
 # ==================== 配色 ====================
@@ -129,10 +130,10 @@ class BattleScene:
             pass
 
         # ---- 字体 ----
-        self.F_BIG = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 34)
-        self.F_MID = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 22)
-        self.F_SML = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 17)
-        self.F_TINY = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 14)
+        self.F_BIG = E.load_font(34)
+        self.F_MID = E.load_font(22)
+        self.F_SML = E.load_font(17)
+        self.F_TINY = E.load_font(14)
 
         # ---- 布局 ----
         self.BTN_END = pygame.Rect(1080, 620, 160, 56)

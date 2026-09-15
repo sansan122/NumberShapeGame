@@ -3,3 +3,18 @@ __pycache__/
 map_tools/out/*.json
 tmp/
 saves/
+
+# PyInstaller 打包产物
+build/
+dist/
+_SelfTest.spec
+*.spec.bak
+
+# 发布包（体积大，随时能用 打包.py 重新生成，不进版本库）
+release/
+
+# 环境探测探针（旧版 game_env 会临时写这个文件）
+.write_probe
+
+# 重打包时用来腾位置的临时名字（打完包应该自己消失）
+*.old

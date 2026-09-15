@@ -6,7 +6,10 @@
 
 ## 一、怎么运行（最重要）
 
-在 `C:\Users\sanji\Desktop\游戏制作尝试\` 里，**双击 `0_START_HERE.bat`**，然后按提示输入数字回车：
+### 给自己玩 / 开发
+
+在 `C:\Users\sanji\Desktop\游戏制作尝试\` 里，**双击 `0_START_HERE.bat`**，
+然后按提示输入数字回车：
 
 ```
 [1] 公理塔地图       ← 主游戏，爬塔选路线
@@ -26,6 +29,21 @@
 | 玩卡牌战斗 | `1_run_card.bat` |
 | 重新生成地图（固定） | `map_tools\2_gen_map.bat` |
 | **随机生成地图** | `map_tools\3_gen_map_random.bat` |
+
+> 这些 `.bat` 现在会**自己找 Python**（项目自带 venv → PATH → `py` → 常见安装路径），
+> 不再写死本机路径，所以拷到别的机器上也能用。
+
+### 给别人玩
+
+跑一次打包：
+
+```
+<python> 打包.py
+```
+
+产出的 `release/数与形-公理塔.zip`（约 25 MB）**直接发出去**。
+对方双击里面的 `NumbersAndForms.exe` 就能玩，**什么都不用装**。
+详见第七章。
 
 ### 打开游戏后你会看到什么
 
@@ -80,7 +98,7 @@
 其余节点是暗的，点不了，点了只会给你看路径。
 
 **地图每次都不一样。** 每开一局都是现场生成的新布局
-（详见第七章「游戏的地图是运行时现场生成的」）。
+（详见第八章「游戏的地图是运行时现场生成的」）。
 左上角战报区第一行会记下本局的随机种子，比如「种子 532265712」，
 方便复现和排查。
 
@@ -366,7 +384,104 @@ screen.blit(img, pr)
 
 ---
 
-## 七、目录结构
+## 七、怎么发给别人玩（打包）
+
+### 一句话版
+
+```
+<python> 打包.py
+```
+
+跑完在 `release/数与形-公理塔.zip`（约 25 MB），**直接把这个 zip 发出去就行**。
+
+### 对方拿到之后要做什么
+
+**双击 `NumbersAndForms.exe`。** 就这一步 —— 不用装 Python、不用装 pygame、
+不用解压到特定位置、不用联网。
+
+（Windows 会弹一次蓝色的「已保护你的电脑」，那是没买数字签名证书的正常提示，
+点「更多信息 → 仍要运行」即可。这一点已经写在给玩家的说明里了。）
+
+### 为什么要打包，不能直接发文件夹
+
+发源码文件夹的话，对方电脑上必须有：
+① Python 3.8+　② pygame　③ 一个装有微软雅黑的系统
+—— 三个条件缺一个就跑不起来。而「只会双击」的人第一个就卡住了。
+
+打包把这三点全解决了：Python 和 pygame 打进了 exe，
+字体也跟着打进去（找不到时还有降级链）。
+
+### `打包.py` 做的四件事
+
+| 步骤 | 做什么 |
+|---|---|
+| 1 | 重新生成所有 `.bat` 启动器（保证编码与探测逻辑是最新的） |
+| 2 | PyInstaller 打成单文件 exe |
+| 3 | 整理发布目录：只放玩家需要的东西 |
+| 4 | **在隔离目录里真跑一遍**，5 秒不崩才算过 |
+
+第 4 步是关键 —— 它模拟「对方拿到手」的场景（一个新文件夹里只有一个 exe，
+没有源码、没有 `data/`），能抓出「本机能跑、拷过去就崩」的问题。
+
+### 发布目录里有什么
+
+```
+release/数与形/
+├── NumbersAndForms.exe     26 MB   双击即玩
+├── 发给别人-怎么玩.txt        4 KB   给玩家看的说明（极简版）
+├── 0_START_HERE.bat        1 KB   备用启动器（会显示报错信息）
+└── 开发者文档.md            40 KB   这个 README 的副本
+```
+
+### 单文件 exe 的取舍
+
+`NumbersAndForms.spec` 里刻意选了 **onefile**（只有一个文件）而不是 onedir：
+
+| | onefile | onedir |
+|---|---|---|
+| 发给别人 | ✅ 一个文件，不会漏 | ⚠️ 一个文件夹，容易漏文件 |
+| 启动速度 | 首次慢 1~2 秒（要解压） | 快 |
+| 出问题排查 | 较难 | 容易 |
+
+对「只会双击的人」来说，**一个文件**比启动快两秒重要得多。
+
+### 想看到报错信息（调试版）
+
+默认 exe 是**无控制台**的（`console=False`），好处是不弹黑框，
+代价是 Python 的报错看不见。要排查问题就临时改：
+
+```python
+# NumbersAndForms.spec 里
+console=True,      # ← 默认 False
+```
+
+重新打包，运行时就会弹一个黑框把报错显示出来。
+
+### 三个针对打包的改造（都是必须的）
+
+打包后 `__file__` 和执行环境都变了，有三处不改就会出问题。
+全部收在 **`game_env.py`** 一个文件里：
+
+| 问题 | 不改会怎样 | 解法 |
+|---|---|---|
+| `__file__` 指向临时解包目录 | **存档写进临时目录，退出即删** | `user_data_path()` → 优先 exe 同级的 `saves/` |
+| 资源被解压到别处 | 读不到 `tower.yaml` | `resource_path()` → `sys._MEIPASS` |
+| 别人电脑没微软雅黑 | **启动就崩** | 多级字体兜底链 + 最终退回 pygame 内置字体 |
+
+**约定**：任何地方要用字体或路径，都从 `game_env` 拿，别再自己写
+`Path(__file__).parent` 或 `"C:/Windows/Fonts/..."`。
+
+### 重启打包（改了代码之后）
+
+```
+<python> 打包.py
+```
+
+会覆盖 `release/` 里的内容。`build/` 和 `dist/` 是中间产物，已在 `.gitignore` 里。
+
+---
+
+## 八、目录结构
 
 ```
 游戏制作尝试/
@@ -374,6 +489,7 @@ screen.blit(img, pr)
 ├── 3_run_game.bat            主游戏启动器（开场界面 → 地图 → 节点 → 战斗 → 下一层）
 ├── main.py                 ★ 主程序入口（场景流转：菜单 / 选角色 / 载入 / 游戏）
 ├── ui_scenes.py            ★ 开场三个界面（主菜单 / 选角色 / 载入中）
+├── game_env.py             ★ 路径与字体的统一入口（打包后靠它还能跑）
 ├── map_scene.py            ★ 地图场景（爬塔、选路线、路线代价）
 ├── node_scenes.py          ★ 非战斗节点面板（休整点 / 商店 / 事件 / 宝箱）
 ├── battle_scene.py         ★ 战斗场景（可被调用的战斗类）
@@ -386,6 +502,15 @@ screen.blit(img, pr)
 ├── test_card.py              独立版卡牌战斗（答题才出牌）
 ├── 4_run_my_test.bat         红方块窗口
 ├── my_test.py                最早的红方块窗口
+├── 打包.py                  ★ 一键打成免安装 exe（详见第七章）
+├── NumbersAndForms.spec      PyInstaller 打包配置
+├── 发给别人-怎么玩.txt         给玩家看的极简说明
+├── release/                  打包产物（已被 .gitignore 忽略）
+│   ├── 数与形/                 发布文件夹（exe + 说明）
+│   └── 数与形-公理塔.zip        ← 直接把这个发出去
+├── tools_dev/                开发用脚本（不参与打包）
+│   ├── gen_bat.py            生成所有 .bat 启动器（GBK + 探测 Python）
+│   └── gen_start_menu.py     生成 0_START_HERE.bat
 ├── README.md                 本文件
 ├── tmp/                      验证脚本与截图（已被 .gitignore 忽略）
 │   ├── verify_ui.py          开场界面验证（无头，52 项断言）
@@ -444,7 +569,7 @@ build_map.py
 
 ---
 
-## 八、地图工具
+## 九、地图工具
 
 运行 `map_tools\2_gen_map.bat`，会：
 
@@ -541,7 +666,7 @@ build_map.py
 
 **改完生成器要做什么？**
 
-- **游戏不用管** —— 它每次开新局都现算（见第七章）
+- **游戏不用管** —— 它每次开新局都现算（见第八章）
 - 想让 `out/map.json` / `out/map.html` 这个**预览**跟着更新，
   重跑一次 `map_tools\2_gen_map.bat`
 - 顺便跑一下 `map_tools/tools/sample_distribution.py` 确认分布没坏
@@ -551,7 +676,7 @@ build_map.py
 
 ---
 
-## 九、避坑记录（踩过的坑，别再踩）
+## 十、避坑记录（踩过的坑，别再踩）
 
 ### 1. `.bat` 报 `Code language not supported or defined`
 
@@ -759,7 +884,7 @@ def handle(self, event, mouse):
 `map.json` 是 `tools/build_map.py` **生成出来的静态文件**。
 
 > ⚠️ **这一条现在只对「预览」有效了。**
-> 游戏已经改成运行时现场生成（见第七章），所以改完 `build_map.py`
+> 游戏已经改成运行时现场生成（见第八章），所以改完 `build_map.py`
 > 直接开游戏就能看到新图。重跑 `.bat` 的意义只剩更新
 > `out/map.json` / `out/map.html` 这两个预览产物。
 
@@ -884,18 +1009,195 @@ rng = random.Random(seed)                                # 再拿它播种
 现在的 `verify_ui.py` 第 2 组会直接断言「HUD 里出现角色名 · 称号」，
 两处漏改一处就会被测出来。
 
+### 17. 打包成 exe 后，`__file__` 和「项目根」全都变了 ⚠️
+
+**这是打包最容易踩、也最致命的一个坑**，因为它表现为
+「本机跑得好好的，发给别人就崩 / 存档莫名其妙丢了」。
+
+**三个具体症状**：
+
+**(a) 存档写进临时目录，退出即删**
+源码模式下 `Path(__file__).parent` 就是项目根，写 `saves/` 没问题。
+打包后 PyInstaller 会把内容解压到 `%TEMP%\_MEIxxxxxx\`，
+`__file__` 指向**那里** —— 存档写进去，程序一退就被清掉，
+玩家下次打开发现存档没了（而且完全不报错，最难查）。
+
+**(b) 读不到数据文件**
+`tower.yaml` 如果没打进包，或者代码按 `__file__.parent.parent/"data"` 去找，
+打包后路径算出来是临时目录里的一个不存在的路径 → 地图生成直接失败。
+
+**(c) 别人电脑上没有微软雅黑 → 启动就崩**
+`pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 20)` 在字体文件不存在时
+**抛异常**。自己电脑上有雅黑，永远发现不了这个问题。
+
+**解法：所有路径和字体都收进一个 `game_env.py`**
+
+```python
+IS_FROZEN = getattr(sys, "frozen", False)   # PyInstaller 会设这个标志
+
+def app_dir():          # exe（或项目根）所在目录 —— 用户看得见的地方
+    return Path(sys.executable).resolve().parent if IS_FROZEN \
+           else Path(__file__).resolve().parent
+
+def resource_path(*p):  # 只读资源：打包后在 _MEIPASS 里
+    base = Path(getattr(sys, "_MEIPASS", app_dir())) if IS_FROZEN \
+           else Path(__file__).resolve().parent
+    return base.joinpath(*p)
+
+def user_data_path(*p): # 可写数据：优先 exe 同级，写不了退 AppData
+    ...
+
+def load_font(size):    # 多级兜底，最后退回 pygame 内置字体，永不抛异常
+    ...
+```
+
+**→ 三条规矩**：
+1. **路径只从一个地方拿**。禁止在业务代码里再写
+   `Path(__file__).parent` 或 `"C:/Windows/Fonts/..."`。
+   散布在 6 个文件里的 31 处字体调用，打包时会全部变成坑。
+2. **区分「只读资源」和「可写数据」**。前者在临时解包目录，
+   后者必须在用户看得见的地方（exe 同级 or AppData）。
+3. **字体要有降级链，永不抛异常**。没有中文字体时退回 pygame
+   内置字体 —— 中文会显示成方块，但**程序能跑、能点、能退出**，
+   比直接崩掉强得多。
+
+**验证方式**：把 exe 单独拷到一个**空文件夹**里跑，
+检查 ① 能启动 ② 存档落在同级的 `saves/`。
+`打包.py` 的第 4 步就是自动做这件事。
+
+### 18. `.bat` 里写死本机 Python 路径，别人电脑上必然报错
+
+**现象**：自己双击 `.bat` 一切正常，发给别人报
+「系统找不到指定的路径」。
+
+**根因**：
+
+```bat
+"C:\Users\sanji\.workbuddy\binaries\python\envs\naf\Scripts\python.exe" "main.py"
+```
+
+这条路径只存在于开发机上。
+
+**解法**：`.bat` 里做**四级探测**，按可靠性从高到低试：
+
+```bat
+set "PYEXE="
+rem 1) 项目自带的虚拟环境（如果一起发过去了）
+if exist "%~dp0.venv\Scripts\python.exe" set "PYEXE=%~dp0.venv\Scripts\python.exe"
+if defined PYEXE goto RUN
+rem 2) PATH 里的 python
+for %%I in (python.exe) do if not defined PYEXE if exist "%%~$PATH:I" set "PYEXE=%%~$PATH:I"
+if defined PYEXE goto RUN
+rem 3) py 启动器
+where py >nul 2>nul
+if %errorlevel%==0 set "PYEXE=py"
+if defined PYEXE goto RUN
+rem 4) 常见安装位置 ...
+rem 都没有 -> 打一段英文提示（不能是中文，见第 1 条）并 exit /b 1
+```
+
+**顺带**：`.bat` 是**生成出来的**（`tools_dev/gen_bat.py`），不是手写的。
+这样能保证：① 编码永远对（GBK）② 五六个 `.bat` 共用同一段探测逻辑，
+改一处不会漏四处 ③ 生成时自动校验「内容纯 ASCII」。
+
+**规矩**：`.bat` 里**永远不出现绝对路径**。
+需要路径就用 `%~dp0`（脚本自身所在目录）。
+
+### 19. 单文件 exe 的启动黑框 / 报错看不见
+
+`console=False` 打包出来的 exe 双击后**没有任何输出窗口**，
+好处是不弹黑框，代价是**Python 的报错完全看不见** ——
+程序闪一下就没了，不知道错在哪。
+
+**排查办法**：临时把 spec 里的 `console=False` 改成 `console=True`，
+重新打包。运行时会弹一个黑框，traceback 就显示在那里。
+
+**另一个办法**（不用重新打包）：程序里自己把关键信息写成日志文件。
+本项目在打包自检时就是这么做的（写 `selftest.log` 到 exe 同级），
+比盯着黑框看更可靠。
+
+**注意**：`console=False` 时 `print()` 不是报错，只是输出被丢掉了。
+所以代码里那些 `print` 在打包版里等于不存在 ——
+真要给用户看的信息得走 `pygame` 画到屏幕上。
+
+### 20. 环境探测写文件又删文件，会把整个程序弄死 ⚠️
+
+这条是打包完之后才暴露出来的，而且**非常隐蔽**，值得单独记一笔。
+
+`game_env.py` 最早判断「这个目录能不能写」的办法是**写一个探针文件再删掉**：
+
+```python
+def _writable(d):
+    try:
+        probe = d / ".write_probe"
+        probe.write_text("x")     # 写
+        probe.unlink()            # 删 ← 问题在这
+        return True
+    except OSError:               # ← 只拦了 OSError
+        return False
+```
+
+看起来天衣无缝，实际有两个问题叠在一起：
+
+**问题一：删文件抛的不是 `OSError`，而是 `SystemExit`。**
+运行环境里有一层「删除保护」，删文件删多了（本回合累计超过 50 个）会直接
+抛 `SystemExit(1)`。而 `SystemExit` 继承自 **`BaseException`**，不是
+`Exception` 的子类 —— 所以 `except OSError` **根本拦不住它**。
+结果就是：探针一写、一删、整个 Python 进程当场退出。
+
+**问题二：这个探测在 import 阶段就被调用。**
+`describe_environment()` → `user_data_path()` → `_writable()`，
+只要有人 import `game_env` 就会跑。于是五个测试脚本、以及游戏本身，
+全部**在 import 那行静默死掉**，屏幕上什么报错都没有
+（打包版连黑框都没有，更难查）。
+
+**症状**：明明代码没错，一运行就秒退，exit code = 1，没有任何 traceback。
+
+**修法**（两条都要做）：
+
+```python
+# 1) 不用「写+删」探针，改用静态权限判断，不产生任何文件
+def _writable(d):
+    try:
+        if not d.is_dir():
+            return False
+        return os.access(str(d), os.W_OK)
+    except (OSError, ValueError):
+        return False
+
+# 2) 兜底要 catch BaseException（含 SystemExit / KeyboardInterrupt），
+#    环境探测出任何意外都不能让游戏起不来
+try:
+    if _writable(primary):
+        return primary.joinpath(*parts)
+except BaseException:
+    pass
+return (Path(os.environ.get("APPDATA") or Path.home()) / "数与形").joinpath(*parts)
+```
+
+**由此得出一条通用规矩**：
+
+> 凡是「为了探测环境」而做的小动作（写文件、删文件、起子进程、读注册表），
+> 外面一律包 `except BaseException`。这类代码的定位是**尽力而为**，
+> 失败时的正确行为是**安静降级**，绝不是把整个程序带崩。
+
+顺带一个好处：改用 `os.access` 之后，exe 同级目录里不会再冒出
+`.write_probe` 这种垃圾文件了（以前每跑一次都会留下 / 删掉一个）。
+
 ---
 
-## 十、接下来打算做的模块
+## 十一、接下来打算做的模块
 
 按优先级排：
 
 - [x] ~~**地图 ⇄ 战斗打通**~~ — 已完成：走到 `×` 战斗节点直接进战斗，打完回地图
 - [x] ~~**节点内容实现**~~ — 已完成：休整点 / 商店 / 事件 / 宝箱四种面板全部可交互，效果真实生效
 - [x] ~~**存档 / 读档**~~ — 已完成：`S` 存 / `L` 读，换层自动存，种子复现地图（详见第六章）
-- [x] ~~**地图随机性**~~ — 已完成：每格独立掷骰子 + 轻量约束，60 轮抽样零扎堆（详见第八章）
+- [x] ~~**地图随机性**~~ — 已完成：每格独立掷骰子 + 轻量约束，60 轮抽样零扎堆（详见第九章）
 - [x] ~~**节点每次运行都不同**~~ — 已完成：地图改为运行时现场生成（`build_in_memory`），开局必出新图
 - [x] ~~**开场界面 + 选角色**~~ — 已完成：主菜单 / 三张角色卡 / 载入画面，动的是占位方框（详见第三章）
+- [x] ~~**打成免安装 exe 发给别人**~~ — 已完成：`打包.py` 一键出 26MB 单文件 exe，
+      打包后存档/字体/资源路径全部自动适配（详见第七章）
 - [ ] **层主战与楼层推进**：打到最上面那行的 `★` 后，进入下一层（当前 `next_floor()` 已有骨架）
 - [ ] **三个角色的被动接进战斗**：现在 `trait` 只有卡面文案，实际没生效
   - 演算者「数字卡连击 +1 伤害」/ 构形师「首次格挡 +2」/ 解方程者「每回合多抽 1 张」
@@ -912,7 +1214,7 @@ rng = random.Random(seed)                                # 再拿它播种
 
 ---
 
-## 十一、策划案
+## 十二、策划案
 
 完整策划案在：`C:\Users\sanji\Desktop\肉鸽卡牌游戏策划案.docx`
 

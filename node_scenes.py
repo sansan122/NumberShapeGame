@@ -26,6 +26,8 @@ import random
 
 import pygame
 
+import game_env as E
+
 # ==================== 配色（与地图/战斗统一）====================
 BG          = (246, 245, 240)
 PANEL       = (255, 255, 255)
@@ -88,10 +90,10 @@ class Panel:
         self.done = False
         self.result = None          # None / "leave"
         self.msg = ""               # 底部提示
-        self.F_BIG = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 30)
-        self.F_MID = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 21)
-        self.F_SML = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 16)
-        self.F_TINY = pygame.font.Font("C:/Windows/Fonts/msyh.ttc", 14)
+        self.F_BIG = E.load_font(30)
+        self.F_MID = E.load_font(21)
+        self.F_SML = E.load_font(16)
+        self.F_TINY = E.load_font(14)
 
     # ---- 子类覆盖 ----
     def handle(self, event, mouse):

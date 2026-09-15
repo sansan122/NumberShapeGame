@@ -1,0 +1,85 @@
+# -*- coding: utf-8 -*-
+"""
+gen_start_menu.py —— 生成 0_START_HERE.bat（主菜单）。
+
+单独一个脚本是因为主菜单内容比较多、要跟 exe 的说法保持一致：
+如果同目录下有打包好的 exe，就直接推荐用它，不再提 Python。
+"""
+
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+
+
+def write_bat(path, lines):
+    for ln in lines:
+        try:
+            ln.encode("ascii")
+        except UnicodeEncodeError:
+            raise SystemExit("!! .bat 里出现了非 ASCII 字符：%r" % ln)
+    Path(path).write_bytes(("\r\n".join(lines) + "\r\n").encode("gbk"))
+
+
+def main():
+    lines = [
+        "@echo off",
+        'cd /d "%~dp0"',
+        "echo ========================================",
+        "echo    Numbers and Forms  -  Quick Start",
+        "echo ========================================",
+        "echo.",
+    ]
+
+    # 如果同目录有打包好的 exe，优先推荐它（对方可能什么都没装）
+    lines += [
+        'if exist "%~dp0NumbersAndForms.exe" goto HAVE_EXE',
+        "echo   [1] Tower map          (main game)",
+        "echo   [2] Card battle        (fight demo)",
+        "echo   [3] Regenerate map     (fixed seed, same map)",
+        "echo   [4] Random map         (new map every time)",
+        "echo   [5] My first window    (my_test.py)",
+        "echo   [0] Quit",
+        "echo.",
+        "set /p CHOICE=Type a number then press ENTER: ",
+        "if \"%CHOICE%\"==\"1\" goto MAPGAME",
+        "if \"%CHOICE%\"==\"2\" goto CARD",
+        "if \"%CHOICE%\"==\"3\" goto GENMAP",
+        "if \"%CHOICE%\"==\"4\" goto RANDMAP",
+        "if \"%CHOICE%\"==\"5\" goto MYTEST",
+        "if \"%CHOICE%\"==\"0\" goto END",
+        "echo Invalid choice.",
+        "pause >nul",
+        "goto END",
+        "",
+        ":MAPGAME",
+        'call "3_run_game.bat"',
+        "goto END",
+        ":CARD",
+        'call "1_run_card.bat"',
+        "goto END",
+        ":GENMAP",
+        'call "map_tools\\2_gen_map.bat"',
+        "goto END",
+        ":RANDMAP",
+        'call "map_tools\\3_gen_map_random.bat"',
+        "goto END",
+        ":MYTEST",
+        'call "4_run_my_test.bat"',
+        "goto END",
+        "",
+        # ---- 有 exe 的场合：直接启动，最省事 ----
+        ":HAVE_EXE",
+        "echo   Found NumbersAndForms.exe - starting the game.",
+        "echo   (This file is standalone; nothing needs to be installed.)",
+        "echo.",
+        'start "" "%~dp0NumbersAndForms.exe"',
+        "goto END",
+        "",
+        ":END",
+    ]
+    write_bat(HERE / "0_START_HERE.bat", lines)
+    print("  0_START_HERE.bat                 %d 行" % len(lines))
+
+
+if __name__ == "__main__":
+    main()

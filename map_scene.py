@@ -23,7 +23,10 @@ from pathlib import Path
 
 import pygame
 
-ROOT = Path(__file__).resolve().parent
+import game_env as E
+
+# 打包成 exe 后 __file__ 指向临时解包目录，所以一律用 game_env 算路径
+ROOT = E.resource_path()
 
 # 屏幕尺寸（必须在类定义前，类方法里会用到）
 WIDTH, HEIGHT = 1280, 720
@@ -86,23 +89,17 @@ def load_map(path=None):
 class MapScene:
     """一整座塔的地图场景（含三层切换）。"""
 
-    def __init__(self, data, floor_index=0, font_path="C:/Windows/Fonts/msyh.ttc"):
+    def __init__(self, data, floor_index=0, font_path=None):
         self.data = data
         self.floor_index = floor_index
 
-        # 字体
-        try:
-            self.F_BIG = pygame.font.Font(font_path, 26)
-            self.F_MID = pygame.font.Font(font_path, 19)
-            self.F_SML = pygame.font.Font(font_path, 15)
-            self.F_TINY = pygame.font.Font(font_path, 13)
-            self.F_ICON = pygame.font.Font(font_path, 22)
-        except Exception:
-            self.F_BIG = pygame.font.Font(None, 26)
-            self.F_MID = pygame.font.Font(None, 19)
-            self.F_SML = pygame.font.Font(None, 15)
-            self.F_TINY = pygame.font.Font(None, 13)
-            self.F_ICON = pygame.font.Font(None, 22)
+        # 字体：交给 game_env 做兜底（自带确定能用的降级链），
+        # font_path 参数保留是为了兼容老调用方，一般不用传。
+        self.F_BIG = E.load_font(26)
+        self.F_MID = E.load_font(19)
+        self.F_SML = E.load_font(15)
+        self.F_TINY = E.load_font(13)
+        self.F_ICON = E.load_font(22)
 
         # 玩家状态（如果外部注入了共享的 Player 对象，就用它的数据）
         self.player = None          # 由 main.Game 注入

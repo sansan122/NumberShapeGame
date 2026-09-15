@@ -17,6 +17,7 @@
 
 import pygame
 
+import game_env as E
 import player as P
 
 # ==================== 配色（浅色主题，与地图/战斗界面统一）====================
@@ -32,11 +33,12 @@ SHADOW     = (228, 226, 218)
 LINE       = (198, 195, 186)
 
 W, H = 1280, 720
-FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
 
 
 def _font(size):
-    return pygame.font.Font(FONT_PATH, size)
+    """字体统一从 game_env 拿 —— 它会做多级兜底，
+    别人电脑上没有微软雅黑也不会崩。"""
+    return E.load_font(size)
 
 
 # ==================== 小工具 ====================

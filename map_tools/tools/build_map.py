@@ -19,10 +19,26 @@ from pathlib import Path
 
 import yaml
 
-# 项目根目录（这个文件在 tools/ 里，所以往上一级）
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "data" / "tower.yaml"
-OUT = ROOT / "out"
+# 路径统一走 game_env：
+#   源码模式 -> 项目根的 map_tools/data/tower.yaml
+#   exe 模式 -> 打进包里的 map_tools/data/tower.yaml（临时解包目录）
+# 直接写 Path(__file__).parent 的话，打包后读不到。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+try:
+    import game_env as _E
+    _RES = _E.resource_path()
+    _HAS_ENV = True
+except Exception:                       # noqa: BLE001
+    # 独立跑这个脚本时（game_env 不在搜索路径上）退回老逻辑
+    _E = None
+    _RES = Path(__file__).resolve().parent.parent
+    _HAS_ENV = False
+
+DATA = _RES / "map_tools" / "data" / "tower.yaml"
+if not DATA.exists():
+    # 兼容老布局：data/ 就在同级
+    DATA = _RES / "data" / "tower.yaml"
+OUT = _RES / "map_tools" / "out"
 
 # 默认随机种子。
 #   - 直接跑：用这个固定值，每次生成结果一致（方便对比调试）
@@ -528,7 +544,14 @@ def build(seed=None):
     传具体数字则结果可复现。
     """
     result = build_in_memory(seed=seed)
-    OUT.mkdir(exist_ok=True)
+
+    # 输出目录要能写。打包成 exe 后 _RES 指向临时解包目录（退出即删），
+    # 所以这里改用 game_env 的「可写目录」，落到 exe 同级的 map_tools/out/。
+    try:
+        out_dir = _E.user_data_path("map_tools", "out")
+    except Exception:                   # noqa: BLE001
+        out_dir = OUT
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     for fl in result["floors"]:
         s = fl["stats"]
@@ -541,7 +564,7 @@ def build(seed=None):
         print(f"    分布：{dist}")
 
     # ---- 写出 JSON（给程序用）----
-    json_path = OUT / "map.json"
+    json_path = out_dir / "map.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"\n已生成：{json_path}")

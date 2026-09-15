@@ -35,6 +35,7 @@ import json
 import time
 from pathlib import Path
 
+import game_env as E
 import map_scene as M
 from player import Player
 
@@ -42,9 +43,14 @@ from player import Player
 # 老存档读到版本不对会拒绝加载（而不是崩掉）。
 SAVE_VERSION = 1
 
-# 存档目录：项目根下的 saves/
-ROOT = Path(__file__).resolve().parent
-SAVE_DIR = ROOT / "saves"
+# 存档目录。
+#
+# ⚠️ 这里不能再用 `Path(__file__).parent` —— 打包成 exe 之后它指向
+# 临时解包目录，那个目录退出就被删，存档等于白存。
+#
+# game_env.user_data_path() 会优先用「exe 同级的 saves/」（整个文件夹
+# 拷走存档跟着走，符合绿色版的直觉），写不了就退回 %APPDATA%。
+SAVE_DIR = E.user_data_path("saves")
 SAVE_FILE = SAVE_DIR / "save.json"
 
 
