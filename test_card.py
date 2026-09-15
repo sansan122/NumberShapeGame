@@ -347,8 +347,8 @@ game = Game()
 running = True
 
 BTN_END = pygame.Rect(1080, 620, 160, 56)
-BTN_SUBMIT = pygame.Rect(560, 470, 160, 50)
-QUIZ_BOX = pygame.Rect(380, 330, 520, 250)
+BTN_SUBMIT = pygame.Rect(560, 492, 160, 46)
+QUIZ_BOX = pygame.Rect(380, 300, 520, 290)
 
 while running:
     mouse = pygame.mouse.get_pos()
@@ -557,16 +557,40 @@ while running:
         screen.blit(title, title.get_rect(center=(QUIZ_BOX.centerx, QUIZ_BOX.y + 40)))
 
         q = game.quiz
-        expr = F_BIG.render(f"{q['a']} {q['op']} {q['b']} = ?", True, ACCENT)
-        screen.blit(expr, expr.get_rect(center=(QUIZ_BOX.centerx, QUIZ_BOX.y + 105)))
+        expr = F_BIG.render(f"{q['a']} {q['op']} {q['b']} =", True, ACCENT)
+        expr_y = QUIZ_BOX.y + 100
 
-        # 输入框
-        inp_rect = pygame.Rect(QUIZ_BOX.centerx - 90, QUIZ_BOX.y + 150, 180, 50)
-        pygame.draw.rect(screen, ACCENT_SOFT, inp_rect, border_radius=8)
-        pygame.draw.rect(screen, ACCENT, inp_rect, 2, border_radius=8)
-        shown = q["input"] if q["input"] else "_"
-        it = F_BIG.render(shown, True, TEXT)
-        screen.blit(it, it.get_rect(center=inp_rect.center))
+        # 算式整体居中：文字 + 间距 + 下划线填空区
+        BLANK_W = 130            # 下划线长度
+        GAP = 18                 # 等号与下划线之间的间距
+        total_w = expr.get_width() + GAP + BLANK_W
+        start_x = QUIZ_BOX.centerx - total_w // 2
+
+        screen.blit(expr, (start_x, expr_y - expr.get_height() // 2))
+
+        # ---- 下划线（填空线）---- 离算式留足 34px，给数字腾出显示空间
+        line_x0 = start_x + expr.get_width() + GAP
+        line_x1 = line_x0 + BLANK_W
+        line_y = expr_y + 34
+        pygame.draw.line(screen, ACCENT, (line_x0, line_y), (line_x1, line_y), 3)
+
+        # ---- 输入的数字显示在下划线上方 ----
+        typed = q["input"]
+        cx_mid = line_x0 + BLANK_W // 2
+        if typed:
+            t = F_BIG.render(typed, True, TEXT)
+            # 数字底边紧贴下划线上方 4px
+            screen.blit(t, t.get_rect(midbottom=(cx_mid, line_y - 4)))
+            # 光标紧跟数字右侧（闪烁）
+            if (pygame.time.get_ticks() // 500) % 2 == 0:
+                cur_x = cx_mid + t.get_width() // 2 + 8
+                pygame.draw.line(screen, ACCENT, (cur_x, line_y - 40),
+                                 (cur_x, line_y - 4), 3)
+        else:
+            # 空值时给个闪烁光标提示可以输入
+            if (pygame.time.get_ticks() // 500) % 2 == 0:
+                pygame.draw.line(screen, ACCENT, (cx_mid, line_y - 40),
+                                 (cx_mid, line_y - 4), 3)
 
         # 提交按钮
         hover = BTN_SUBMIT.collidepoint(mouse)
@@ -575,8 +599,8 @@ while running:
         sb = F_MID.render("提交", True, (255, 255, 255))
         screen.blit(sb, sb.get_rect(center=BTN_SUBMIT.center))
 
-        hint = F_TINY.render("用数字键输入，回车提交，退格删除", True, TEXT_MUTE)
-        screen.blit(hint, hint.get_rect(center=(QUIZ_BOX.centerx, QUIZ_BOX.bottom - 26)))
+        hint = F_TINY.render("直接敲数字键输入，回车提交，退格删除", True, TEXT_MUTE)
+        screen.blit(hint, hint.get_rect(center=(QUIZ_BOX.centerx, QUIZ_BOX.bottom - 22)))
 
     # ---------- 胜负画面 ----------
     if game.phase in ("win", "lose"):
