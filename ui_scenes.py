@@ -19,6 +19,7 @@ import pygame
 
 import game_env as E
 import player as P
+import save_system
 
 # ==================== 配色（浅色主题，与地图/战斗界面统一）====================
 BG         = (246, 245, 240)
@@ -442,3 +443,153 @@ class LoadingScene:
         n = int(self.t * 3) % 4
         center_text(surf, "正 在 生 成 地 图" + "·" * n,
                     self.f_mid, TEXT_FAINT, W // 2, 500)
+
+
+# ==================== 界面四：存档槽选择 ====================
+class SaveSlotScene:
+    """三个存档槽的列表，用来「读档」或「存档」。
+
+    两种模式（构造时用 mode 指定）：
+        mode="load"  从主菜单进来，点有存档的槽 -> 读档；空槽不可点
+        mode="save"  游戏内按 S 进来，点任意槽 -> 覆盖存档（空槽新建）
+
+    返回值：
+        ("load", slot)  读这个槽
+        ("save", slot)  存到这个槽
+        "back"          返回上一级
+        None            什么都不做
+    """
+
+    name = "saveslot"
+
+    def __init__(self, mode="load"):
+        self.mode = mode
+        self.slots = save_system.list_slots()
+
+        self.f_title = _font(30)
+        self.f_slot   = _font(22)
+        self.f_body   = _font(15)
+        self.f_tiny   = _font(14)
+
+        # 三个槽位卡片，竖排居中
+        cw, ch, gap = 620, 128, 22
+        x0 = W // 2 - cw // 2
+        y0 = 180
+        self.cards = []
+        for i in range(len(self.slots)):
+            r = pygame.Rect(x0, y0 + i * (ch + gap), cw, ch)
+            self.cards.append(r)
+
+        self.btn_back = pygame.Rect(0, 0, 180, 52)
+        self.btn_back.center = (W // 2, 660)
+
+        self.hover = -1
+        self.hover_back = False
+
+    def _title(self):
+        return "选择要读取的存档" if self.mode == "load" else "选择要存档的位置"
+
+    # ---------- 输入 ----------
+    def handle(self, event, mouse):
+        if event.type == pygame.MOUSEMOTION:
+            self.hover = self._slot_at(mouse)
+            self.hover_back = self.btn_back.collidepoint(mouse)
+
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            i = self._slot_at(mouse)
+            if i >= 0:
+                if self.mode == "load":
+                    if self.slots[i]["exists"]:
+                        return ("load", i)
+                    return None          # 空槽读不了
+                return ("save", i)        # 存档模式点任意槽都行
+            if self.btn_back.collidepoint(mouse):
+                return "back"
+
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                return "back"
+            # 数字键 1/2/3 快速选槽
+            if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                i = event.key - pygame.K_1
+                if self.mode == "load":
+                    if self.slots[i]["exists"]:
+                        return ("load", i)
+                    return None
+                return ("save", i)
+
+        return None
+
+    def _slot_at(self, mouse):
+        for i, r in enumerate(self.cards):
+            if r.collidepoint(mouse):
+                return i
+        return -1
+
+    def update(self, dt):
+        pass
+
+    # ---------- 绘制 ----------
+    def draw(self, surf, mouse=(0, 0), t_ms=0):
+        surf.fill(BG)
+
+        center_text(surf, self._title(), self.f_title, TEXT, W // 2, 92)
+        center_text(surf, "可以同时保留三局不同的进度",
+                    self.f_tiny, TEXT_FAINT, W // 2, 128)
+
+        for i, r in enumerate(self.cards):
+            self._slot_card(surf, i, r)
+
+        # 返回按钮
+        draw_box(surf, self.btn_back,
+                 fill=(250, 249, 245) if self.hover_back else PANEL,
+                 border=LINE, width=2)
+        center_text(surf, "返回", self.f_slot, TEXT_MUTE,
+                    self.btn_back.centerx, self.btn_back.centery)
+
+        center_text(surf, "点槽位选择　·　1/2/3 快速选　·　ESC 返回",
+                    self.f_tiny, TEXT_FAINT, W // 2, H - 24)
+
+    def _slot_card(self, surf, i, r):
+        slot = self.slots[i]
+        exists = slot["exists"]
+        info = slot["info"]
+        hot = (self.hover == i)
+
+        can_click = exists if self.mode == "load" else True
+        border = ACCENT if (hot and can_click) else (GOLD if exists else LINE)
+        draw_box(surf, r,
+                 fill=(250, 249, 245) if hot else PANEL,
+                 border=border, width=2)
+
+        # 左侧：槽位号
+        num = _font(40)
+        center_text(surf, str(i + 1), num,
+                    TEXT if exists else TEXT_FAINT,
+                    r.x + 52, r.centery)
+
+        # 右侧内容
+        tx = r.x + 110
+        if exists and info:
+            name = _font(20)
+            center_text(surf, "第 %d 层 · %s" % (info["floor_index"] + 1,
+                                             info["floor_name"] or "?"),
+                        name, TEXT, r.x + r.w // 2 + 40, r.y + 34)
+            body = _font(15)
+            line = "生命 %d/%d　金币 %d　牌 %d 张　%s" % (
+                info["hp"], info["max_hp"], info["gold"],
+                info["deck_size"], info["saved_at"])
+            s = body.render(line, True, TEXT_MUTE)
+            surf.blit(s, (tx, r.y + 74))
+        else:
+            name = _font(20)
+            center_text(surf, "（空）", name, TEXT_FAINT,
+                        r.x + r.w // 2 + 40, r.centery)
+
+        # 读档模式下空槽标注「不可读」
+        if self.mode == "load" and not exists:
+            tag = self.f_tiny.render("空槽", True, TEXT_FAINT)
+            surf.blit(tag, (r.right - tag.get_width() - 20, r.y + 14))
+        elif self.mode == "save" and exists:
+            tag = self.f_tiny.render("覆盖", True, (200, 70, 70))
+            surf.blit(tag, (r.right - tag.get_width() - 20, r.y + 14))

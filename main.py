@@ -17,6 +17,7 @@
 运行：双击 3_run_game.bat
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -57,13 +58,15 @@ TYPE_ICON = {
 class Game:
     """顶层状态机：map / node / battle。"""
 
-    def __init__(self, save_data=None, char=None):
+    def __init__(self, save_data=None, char=None, save_slot=0):
         """
         save_data=None  -> 开一局新的
         save_data=dict  -> 从存档接着玩（用 save_system.build_game_data 造出来）
         char=dict       -> 本局用哪个角色（player.CHARACTERS 里的一项）
+        save_slot       -> 这局关联哪个存档槽（自动存档、S 存档默认写这里）
         """
-        self.save_mgr = save_system.SaveManager()
+        self.save_slot = save_slot
+        self.save_mgr = save_system.SaveManager(slot=save_slot)
         self.floor_stats = {}       # 每层战绩：{"1": {"battle": 3, "win": 3}}
 
         if save_data:
@@ -213,31 +216,39 @@ class Game:
             self.save_mgr.delete()
 
     # ==================== 存档 / 读档 ====================
-    def save_game(self, quiet=False):
+    def save_game(self, quiet=False, slot=None):
         if self.mode == "battle":
             self.flash("战斗中不能存档")
             return False
+        if slot is not None:
+            # 显式指定槽位：换一个 SaveManager 存过去，并记住本局绑这个槽
+            self.save_slot = slot
+            self.save_mgr = save_system.SaveManager(slot=slot)
         ok = self.save_mgr.save(self)
         if not quiet:
             if ok:
-                self.flash("已存档")
+                self.flash("已存档（槽 %d）" % (self.save_slot + 1))
             else:
                 self.flash("存档失败：%s" % self.save_mgr.last_error)
         return ok
 
     def auto_save(self):
-        """静默存档，不弹提示。"""
+        """静默存档，不弹提示（换层时用，写到本局绑定的槽）。"""
         return self.save_game(quiet=True)
 
-    def load_game(self):
-        """读档并重建整局。返回新的 Game 或 None。"""
-        data = self.save_mgr.load()
+    def load_game(self, slot=None):
+        """从指定槽读档并重建整局。返回新的 Game 或 None。"""
+        if slot is not None:
+            mgr = save_system.SaveManager(slot=slot)
+        else:
+            mgr = self.save_mgr
+        data = mgr.load()
         if data is None:
-            self.flash("读档失败：%s" % self.save_mgr.last_error)
+            self.flash("读档失败：%s" % mgr.last_error)
             return None
         try:
             built = save_system.build_game_data(data)
-            return Game(save_data=built)
+            return Game(save_data=built, save_slot=(slot if slot is not None else 0))
         except Exception as e:              # noqa: BLE001
             self.flash("存档内容有问题：%s" % e)
             return None
@@ -285,6 +296,14 @@ class Game:
                 self.deck_view.open_with(self.player.deck, self.player.char)
                 return None
 
+        # M 返回主菜单 —— 地图 / 节点 / 战斗都能回，不用再「只能退出程序」。
+        # 战斗答题时例外（M 会让位给数字输入，避免误触）。
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_m:
+            b = self.battle
+            blocked = (self.mode == "battle" and b and b.quiz is not None)
+            if not blocked:
+                return "menu"
+
         if self.mode == "map":
             return self.handle_map(event, mouse)
         if self.mode == "node":
@@ -298,13 +317,9 @@ class Game:
             if event.key == pygame.K_ESCAPE:
                 return "quit"
             if event.key == pygame.K_s:
-                self.save_game()
-                return None
+                return "save_menu"
             if event.key == pygame.K_l:
-                ng = self.load_game()
-                if ng is not None:
-                    return ("replace", ng)
-                return None
+                return "load_menu"
             if event.key in (pygame.K_UP, pygame.K_w):
                 self.map.scroll_up(70)
             elif event.key in (pygame.K_DOWN,):
@@ -376,7 +391,7 @@ class Game:
         if self.mode == "map":
             self.map.draw(screen, mouse, t_ms)
             self.draw_player_panel(screen)
-            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　D 看牌组　·　S 存档　L 读档　·　ESC 退出")
+            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　D 看牌组　·　S 存档　L 读档　·　M 主菜单　·　ESC 退出")
         elif self.mode == "node":
             self.panel.draw(screen, mouse, t_ms)
         elif self.mode == "battle":
@@ -524,26 +539,27 @@ def main():
            │                    │
            └─「继续」读档 ───────┴────────────────────────> 爬塔地图
     """
+    # 在 pygame.init() 之前关掉 IME（中文输入法）。
+    # 这是中文 Windows 上「键盘按键全都没反应」的头号原因：
+    # 系统输入法处于中文状态时会把按键拦走做候选词，pygame 收不到
+    # 正常的 KEYDOWN。这个环境变量必须在 init 之前设置才会生效。
+    os.environ["SDL_IME_SHOW_UI"] = "0"
+
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption(WINDOW_TITLE)
     pygame.display.set_icon(make_window_icon())
     clock = pygame.time.Clock()
 
-    # 用一个「探针」拿到存档信息给主菜单显示（不真正开局，
-    # 免得光看菜单就生成一张图）
-    probe_mgr = save_system.SaveManager()
-    has_save = probe_mgr.exists()
-    save_info = ""
-    if has_save:
-        info = probe_mgr.info()
-        if info:
-            save_info = "%s　第 %d 层　生命 %d/%d" % (
-                info["saved_at"], info["floor_index"] + 1,
-                info["hp"], info["max_hp"])
+    # 游戏全程不需要文字输入，主动停掉 SDL 的 text input 通道，
+    # 进一步保证 IME 不会拦走按键（战斗答题用的是 KEYDOWN 的 key 码，
+    # 不依赖 text input 事件）。
+    pygame.key.stop_text_input()
 
-    scene = UI.MenuScene(has_save=has_save, save_info=save_info)
+    # 主菜单。用 list_slots() 反映当前所有槽位的存档状态。
+    scene = _menu_scene()
     game = None                 # 正式开局后才建
+    paused_game = None          # 非 None = 游戏暂停在存档槽选择界面
 
     running = True
     while running:
@@ -551,13 +567,43 @@ def main():
         mouse = pygame.mouse.get_pos()
         t_ms = pygame.time.get_ticks()
 
-        # 当前这一帧要画谁：有 game 就画游戏，否则画 UI 场景
-        active = game if game is not None else scene
+        # 当前这一帧要画谁：
+        #   游戏暂停在存档槽界面 -> 画存档槽
+        #   否则有 game -> 画游戏，没有 -> 画 UI 场景
+        if paused_game is not None:
+            active = scene
+        else:
+            active = game if game is not None else scene
 
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
                 break
+
+            # ---------- 游戏暂停在存档槽选择界面 ----------
+            if paused_game is not None:
+                r = scene.handle(ev, mouse)
+                if r == "back":
+                    # 取消，回到游戏
+                    paused_game = None
+                    scene = None
+                elif isinstance(r, tuple) and r[0] == "save":
+                    _, slot = r
+                    if paused_game.save_game(slot=slot):
+                        paused_game = None
+                        scene = None
+                elif isinstance(r, tuple) and r[0] == "load":
+                    _, slot = r
+                    ng = _load_from_disk(slot)
+                    if ng is None:
+                        paused_game.flash("读档失败")
+                        paused_game = None
+                        scene = None
+                    else:
+                        game = ng
+                        paused_game = None
+                        scene = None
+                continue
 
             # ---------- UI 场景（主菜单 / 选角色 / 过渡）----------
             if game is None:
@@ -577,22 +623,13 @@ def main():
                     continue
 
                 if r == "load":
-                    ng = _load_from_disk()
-                    if ng is None:
-                        # 存档坏了：留在菜单，把原因显示出来
-                        scene = UI.MenuScene(
-                            has_save=False,
-                            save_info="")
-                        print("[读档失败] %s" % probe_mgr.last_error)
-                    else:
-                        game = ng
+                    # 主菜单「继续」-> 进存档槽选择（读档）
+                    scene = UI.SaveSlotScene(mode="load")
                     continue
 
                 if r == "back":
-                    # 从选角色退回主菜单时，重新读一遍存档状态
-                    has_save = probe_mgr.exists()
-                    scene = UI.MenuScene(has_save=has_save,
-                                         save_info=_save_line())
+                    # 从选角色/存档槽退回主菜单，重读存档状态
+                    scene = _menu_scene()
                     continue
 
                 continue    # 场景内部的小动作（切换选中等）
@@ -604,13 +641,12 @@ def main():
                         game = None
                         scene = UI.CharSelectScene()
                     elif ev.key == pygame.K_l:
-                        ng = game.load_game()
-                        if ng is not None:
-                            game = ng
+                        # 死亡画面读档：也走槽选择
+                        paused_game = game
+                        scene = UI.SaveSlotScene(mode="load")
                     elif ev.key == pygame.K_m:
                         game = None
-                        scene = UI.MenuScene(has_save=probe_mgr.exists(),
-                                             save_info=_save_line())
+                        scene = _menu_scene()
                     elif ev.key == pygame.K_ESCAPE:
                         running = False
                 continue
@@ -619,6 +655,21 @@ def main():
             if r == "quit":
                 running = False
                 break
+            if r == "menu":
+                # M 键：回主菜单（不是退出程序）
+                game = None
+                scene = _menu_scene()
+                continue
+            if r == "save_menu":
+                # S 键：暂停游戏，进存档槽选择（存档）
+                paused_game = game
+                scene = UI.SaveSlotScene(mode="save")
+                continue
+            if r == "load_menu":
+                # L 键：暂停游戏，进存档槽选择（读档）
+                paused_game = game
+                scene = UI.SaveSlotScene(mode="load")
+                continue
             if isinstance(r, tuple) and r[0] == "replace":
                 # 读档成功：整局换掉，继续跑
                 game = r[1]
@@ -628,7 +679,7 @@ def main():
             break
 
         # 过渡场景自己倒数，到点就真的开一局
-        if game is None:
+        if paused_game is None and game is None:
             r = scene.update(dt)
             if r == "done":
                 try:
@@ -639,7 +690,7 @@ def main():
                     break
                 scene = None
                 continue
-        else:
+        elif paused_game is None:
             game.update(dt)
 
         active.draw(screen, mouse, t_ms)
@@ -650,25 +701,41 @@ def main():
 
 
 def _save_line():
-    """主菜单要显示的一行存档摘要（没有存档就返回空串）。"""
-    mgr = save_system.SaveManager()
-    info = mgr.info()
-    if not info:
+    """主菜单要显示的一行存档摘要（有多个槽时，显示最近的那个）。"""
+    slots = save_system.list_slots()
+    # 挑一个「最近保存」的有档槽位来显示
+    best = None
+    for s in slots:
+        if s["exists"] and s["info"]:
+            if best is None or s["info"]["saved_at"] > best["info"]["saved_at"]:
+                best = s
+    if best is None:
         return ""
-    return "%s　第 %d 层　生命 %d/%d" % (
-        info["saved_at"], info["floor_index"] + 1,
+    info = best["info"]
+    return "最近存档：槽 %d　第 %d 层　生命 %d/%d" % (
+        best["slot"] + 1, info["floor_index"] + 1,
         info["hp"], info["max_hp"])
 
 
-def _load_from_disk():
-    """从磁盘读档并造一局新的。失败返回 None。"""
-    mgr = save_system.SaveManager()
+def _has_any_save():
+    """有没有任意一个槽位有存档（主菜单「继续」按钮是否可用）。"""
+    return any(s["exists"] for s in save_system.list_slots())
+
+
+def _menu_scene():
+    """造一个反映当前存档状态的主菜单。"""
+    return UI.MenuScene(has_save=_has_any_save(), save_info=_save_line())
+
+
+def _load_from_disk(slot):
+    """从指定槽位读档并造一局新的。失败返回 None。"""
+    mgr = save_system.SaveManager(slot=slot)
     data = mgr.load()
     if data is None:
         return None
     try:
         built = save_system.build_game_data(data)
-        return Game(save_data=built)
+        return Game(save_data=built, save_slot=slot)
     except Exception as e:                  # noqa: BLE001
         print("[读档失败] 存档内容有问题：%s" % e)
         return None

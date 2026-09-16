@@ -3,7 +3,7 @@
 ================================================
 把一局爬塔的进度写到一个 JSON 文件里，下次打开接着玩。
 
-存了什么（saves/save.json）：
+存了什么（saves/save_1.json ~ save_3.json，三个槽位）：
     version      存档格式版本号（以后改结构时用来判断能不能读）
     saved_at     存档时间（给人看的）
     seed         生成这张地图用的随机种子
@@ -24,11 +24,12 @@
     并在地图上记一条日志说明。至少血和牌不会丢。
 
 怎么用：
-    from save_system import SaveManager
-    sm = SaveManager()
-    sm.save(game)              # 存
-    data = sm.load()           # 读（返回 dict 或 None）
-    sm.delete()                # 删
+    from save_system import SaveManager, list_slots
+    sm = SaveManager(slot=0)    # 绑定槽 0
+    sm.save(game)               # 存到槽 0
+    data = sm.load()            # 读槽 0（返回 dict 或 None）
+    sm.delete()                 # 删槽 0
+    slots = list_slots()        # 看所有槽的状态（菜单用）
 """
 
 import json
@@ -51,15 +52,35 @@ SAVE_VERSION = 1
 # game_env.user_data_path() 会优先用「exe 同级的 saves/」（整个文件夹
 # 拷走存档跟着走，符合绿色版的直觉），写不了就退回 %APPDATA%。
 SAVE_DIR = E.user_data_path("saves")
-SAVE_FILE = SAVE_DIR / "save.json"
+
+# 存档槽位数。三个槽，玩家可以同时保留三局不同进度的爬塔。
+# 槽位号从 0 开始，对应文件 save_1.json / save_2.json / save_3.json。
+SLOT_COUNT = 3
+
+# 兼容旧版：以前只有一个 save.json。迁到多槽后，第一次读旧档时
+# 把它认作「槽 0」，这样老玩家不会丢进度。
+LEGACY_FILE = SAVE_DIR / "save.json"
+
+
+def slot_file(slot):
+    """槽位号 -> 存档文件路径。slot 从 0 开始。"""
+    return SAVE_DIR / ("save_%d.json" % (slot + 1))
 
 
 class SaveManager:
     """存档文件的读写。所有方法都不抛异常给上层，
-    失败时返回 False / None，并把原因写在 self.last_error 里。"""
+    失败时返回 False / None，并把原因写在 self.last_error 里。
 
-    def __init__(self, path=None):
-        self.path = Path(path) if path else SAVE_FILE
+    支持多个存档槽：构造时传 slot（0 开始）就绑定那个槽的文件，
+    不传就默认槽 0。要一次看所有槽，用模块级的 list_slots()。
+    """
+
+    def __init__(self, path=None, slot=0):
+        if path is not None:
+            self.path = Path(path)
+        else:
+            self.path = slot_file(slot)
+        self.slot = slot
         self.last_error = ""
 
     # ==================== 查询 ====================
@@ -170,6 +191,45 @@ class SaveManager:
                 self.last_error = "删不掉：%s" % e
                 return False
         return True
+
+
+def _migrate_legacy_once():
+    """把旧版单文件 save.json 迁到槽 0（只迁一次，迁完就删旧文件）。
+
+    旧版存档叫 save.json，多槽后叫 save_1.json。为了不丢老玩家的进度，
+    第一次跑的时候发现 save.json 还在、而 save_1.json 还没有，
+    就把旧档认作槽 0。删旧文件失败不影响，下次还会再试。
+    """
+    if not LEGACY_FILE.exists():
+        return
+    target = slot_file(0)
+    if target.exists():
+        # 槽 0 已经有档了，旧文件让位（不覆盖，宁可留着也不丢）
+        return
+    try:
+        LEGACY_FILE.rename(target)
+    except OSError:
+        # 改名失败（可能被占用），下次再试；旧档至少还在
+        pass
+
+
+def list_slots():
+    """返回所有槽位的状态列表，供菜单显示。
+
+    返回 [ {slot, info, exists}, ... ]，info 是 SaveManager.info() 的结果
+    （不存在则为 None）。顺带做一次旧档迁移。
+    """
+    _migrate_legacy_once()
+    result = []
+    for s in range(SLOT_COUNT):
+        mgr = SaveManager(slot=s)
+        info = mgr.info()
+        result.append({
+            "slot": s,
+            "exists": mgr.exists(),
+            "info": info,
+        })
+    return result
 
 
 def build_game_data(save, map_data=None):
