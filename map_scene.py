@@ -315,6 +315,24 @@ class MapScene:
         self.cam_target += dy
         self.cam_y += dy
 
+    # ------------------------------------------------------------------
+    # 滚动的「正方向」约定 —— 别再在事件层直接调 scroll() 了
+    # ------------------------------------------------------------------
+    # 记清楚这条链条，就不会再写反：
+    #     画面 y = HEIGHT/2 + (世界 y - cam_y)
+    # 所以 cam_y **变大** -> 画面上的内容整体**上移** -> 我们看到的是塔的**下方**。
+    # 也就是说：cam_y 变大 = 视野往下走。
+    #
+    # 「往上看」（滚轮上滚 / ↑）和 cam_y 的正方向是**相反**的。
+    # 这里用两个名字点明意图，调用方就不用再自己推符号了。
+    def scroll_up(self, amount):
+        """视野往塔的上方走（能看到更高的楼层）。"""
+        self.scroll(-amount)
+
+    def scroll_down(self, amount):
+        """视野往塔的下方走（能看到更低的楼层）。"""
+        self.scroll(amount)
+
     def clamp_camera(self):
         """限制相机范围，别滚出地图。"""
         if not self.row_nodes or not self.row_nodes[-1]:
@@ -608,11 +626,15 @@ def main():
                 if ev.key == pygame.K_ESCAPE:
                     running = False
                 elif ev.key in (pygame.K_UP, pygame.K_w):
-                    scene.scroll(60)
+                    scene.scroll_up(60)
                 elif ev.key in (pygame.K_DOWN, pygame.K_s):
-                    scene.scroll(-60)
+                    scene.scroll_down(60)
             elif ev.type == pygame.MOUSEWHEEL:
-                scene.scroll(ev.y * 50)
+                # ev.y > 0 = 滚轮往上滚 -> 往塔的上方看
+                if ev.y > 0:
+                    scene.scroll_up(ev.y * 50)
+                else:
+                    scene.scroll_down(-ev.y * 50)
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 n = scene.hovered_node(mouse)
                 if n is not None:

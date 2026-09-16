@@ -34,6 +34,7 @@ import node_scenes as NS         # noqa: E402
 import save_system               # noqa: E402
 import player as P               # noqa: E402
 import ui_scenes as UI           # noqa: E402
+import deck_view                 # noqa: E402
 import build_map as B            # noqa: E402
 from player import Player        # noqa: E402
 from battle_scene import BattleScene, ENEMY_KINDS   # noqa: E402
@@ -79,6 +80,10 @@ class Game:
         self.msg = ""
         self.msg_t = 0.0
         self.pending_node = None
+
+        # 牌组查看覆盖层。放在 Game 这一层统一管，
+        # 于是地图上 / 节点面板里 / 战斗里 按 D 都能打开，逻辑只有一份。
+        self.deck_view = deck_view.DeckView()
 
         self.F_MID = E.load_font(21)
         self.F_SML = E.load_font(16)
@@ -260,7 +265,26 @@ class Game:
         注意这里必须 return —— handle_map / handle_node / handle_battle
         会返回 "quit" 或 ("replace", game) 这类信号，
         丢掉返回值就等于「按 ESC 不退出、按 L 不换局」。
+
+        牌组面板是个**覆盖层**，它开着的时候要优先吃掉事件，
+        否则在战斗里按 ↑↓ 翻牌组会连带把战场也操作了。
         """
+        if self.deck_view.open:
+            self.deck_view.handle(event, mouse)
+            return None
+
+        # D 打开牌组 —— 三种模式（地图 / 节点 / 战斗）都支持。
+        # 两种情况下不开：
+        #   · 战斗中正在答题（会干扰输入）
+        #   · 战斗已结算（那时候按任意键都该是「离开」，别把按键吞掉）
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_d:
+            b = self.battle
+            blocked = (self.mode == "battle" and b
+                       and (b.quiz is not None or b.done))
+            if not blocked:
+                self.deck_view.open_with(self.player.deck, self.player.char)
+                return None
+
         if self.mode == "map":
             return self.handle_map(event, mouse)
         if self.mode == "node":
@@ -282,13 +306,17 @@ class Game:
                     return ("replace", ng)
                 return None
             if event.key in (pygame.K_UP, pygame.K_w):
-                self.map.scroll(70)
-            elif event.key == pygame.K_DOWN:
-                self.map.scroll(-70)
+                self.map.scroll_up(70)
+            elif event.key in (pygame.K_DOWN,):
+                self.map.scroll_down(70)
             return None
 
         if event.type == pygame.MOUSEWHEEL:
-            self.map.scroll(event.y * 55)
+            # ev.y > 0 = 滚轮往上滚 -> 往塔的上方看（方向约定见 MapScene.scroll_up）
+            if event.y > 0:
+                self.map.scroll_up(event.y * 55)
+            else:
+                self.map.scroll_down(-event.y * 55)
             return None
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -325,7 +353,7 @@ class Game:
             result = self.battle.result
             self.battle = None
             if result == "lose":
-                self.flash("演算者倒下了 —— 按 R 重新开始", 6)
+                self.flash("%s倒下了 —— 按 R 重新开始" % self.player.char["name"], 6)
                 self.mode = "dead"
             else:
                 self.after_node()
@@ -335,6 +363,8 @@ class Game:
     def update(self, dt):
         if self.msg_t > 0:
             self.msg_t = max(0.0, self.msg_t - dt)
+
+        self.deck_view.update(dt)
 
         if self.mode == "map":
             self.map.update(dt)
@@ -346,7 +376,7 @@ class Game:
         if self.mode == "map":
             self.map.draw(screen, mouse, t_ms)
             self.draw_player_panel(screen)
-            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　S 存档　L 读档　·　ESC 退出")
+            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　D 看牌组　·　S 存档　L 读档　·　ESC 退出")
         elif self.mode == "node":
             self.panel.draw(screen, mouse, t_ms)
         elif self.mode == "battle":
@@ -356,6 +386,9 @@ class Game:
 
         if self.msg_t > 0 and self.mode != "dead":
             self.draw_toast(screen)
+
+        # 牌组面板画在最上层（它是覆盖层，要盖住地图/面板/战斗）
+        self.deck_view.draw(screen, mouse, t_ms)
 
     def draw_player_panel(self, screen):
         """地图上显示的玩家状态（覆盖地图自带的简化版）。"""
@@ -453,7 +486,9 @@ class Game:
 
     def draw_dead(self, screen):
         screen.fill((246, 245, 240))
-        msg = self.F_MID.render("演算者倒下了", True, (200, 70, 70))
+        # 角色名从玩家状态读 —— 选了构形师却写「演算者倒下了」会很出戏
+        ch = self.player.char
+        msg = self.F_MID.render("%s倒下了" % ch["name"], True, (200, 70, 70))
         screen.blit(msg, msg.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 50)))
 
         tips = "按 R 重新开始　·　M 回主菜单　·　ESC 退出"

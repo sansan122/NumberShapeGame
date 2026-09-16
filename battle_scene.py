@@ -402,59 +402,78 @@ class BattleScene:
         t2 = self.F_SML.render("回合 %d" % self.turn, True, TEXT_MUTE)
         screen.blit(t2, (WIDTH - 130, 18))
 
+        # 牌堆计数 + 「看牌组」提示。
+        # 有了这两个数字 + 牌组面板，玩家能自己核对：
+        #     抽牌堆 + 手牌 + 弃牌堆 = 牌组总张数
+        # 出牌/弃牌对不上时一眼能看出来。
+        pile = self.F_SML.render(
+            "抽牌堆 %d　弃牌堆 %d" % (len(self.deck), len(self.discard)),
+            True, TEXT_MUTE)
+        px = WIDTH - 148 - pile.get_width()
+        screen.blit(pile, (px, 18))
+
+        hint = self.F_SML.render("D 查看牌组", True, ACCENT)
+        screen.blit(hint, (px - 22 - hint.get_width(), 18))
+
         # ---------- 玩家区 ----------
         p_area = pygame.Rect(70, 130, 260, 250)
         self.panel(screen, p_area)
-        pygame.draw.circle(screen, ACCENT, (200, 205), 46)
-        pl = self.F_MID.render("演算者", True, (255, 255, 255))
-        screen.blit(pl, pl.get_rect(center=(200, 205)))
 
-        htxt = self.F_SML.render("生命 %d / %d" % (max(0, self.p_hp), self.p_max_hp),
-                                 True, TEXT)
-        screen.blit(htxt, (100, 290))
-        self.bar(screen, 100, 314, 200, 14, self.p_hp, self.p_max_hp, RED,
-                 (238, 236, 230))
+        # 角色名放最上面一行，头像圆圈下面留给血条
+        ch = self.player.char
+        pn = self.F_SML.render("%s · %s" % (ch["name"], ch["title"]), True, TEXT_MUTE)
+        screen.blit(pn, pn.get_rect(center=(200, 146)))
+
+        # 头像：先用角色符号占位（美术资源到位后换成贴图，位置不用动）
+        pygame.draw.circle(screen, ch["color"], (200, 205), 46)
+        icon = self.F_BIG.render(ch["icon"], True, (255, 255, 255))
+        screen.blit(icon, icon.get_rect(center=(200, 205)))
+
+        # 血条 —— 就贴在头像正下方
+        self.hp_bar(screen, 200, 256, self.p_hp, self.p_max_hp)
 
         # 格挡
         if self.p_block > 0:
-            pygame.draw.circle(screen, ACCENT, (112, 340), 16)
+            pygame.draw.circle(screen, ACCENT, (112, 308), 16)
             bl = self.F_SML.render(str(self.p_block), True, (255, 255, 255))
-            screen.blit(bl, bl.get_rect(center=(112, 340)))
+            screen.blit(bl, bl.get_rect(center=(112, 308)))
         ry = self.F_SML.render("形值 %d" % self.p_residue, True, PURPLE)
-        screen.blit(ry, (140, 331))
+        screen.blit(ry, (140, 299))
 
         # 能量
         en_lbl = self.F_SML.render("能量", True, TEXT_MUTE)
-        screen.blit(en_lbl, (100, 356))
+        screen.blit(en_lbl, (100, 334))
         for i in range(self.p_max_energy):
             cx = 150 + i * 24
             col = AMBER if i < self.p_energy else (228, 226, 218)
-            pygame.draw.circle(screen, col, (cx, 364), 9)
+            pygame.draw.circle(screen, col, (cx, 342), 9)
 
         # ---------- 敌人区 ----------
         e_area = pygame.Rect(WIDTH - 330, 130, 260, 250)
         self.panel(screen, e_area)
+
+        enm = self.F_SML.render(self.e_name, True, TEXT_MUTE)
+        screen.blit(enm, enm.get_rect(center=(WIDTH - 200, 146)))
+
         pygame.draw.circle(screen, RED, (WIDTH - 200, 205), 46)
-        en = self.F_MID.render(self.e_name[:4], True, (255, 255, 255))
+        # 圆圈里只放名字的前 2 个字：完整名字已经写在圆圈上面了，
+        # 塞 4 个字会横向撑出圆圈（22 号字 × 4 ≈ 88px，圆圈直径才 92px）
+        en = self.F_BIG.render(self.e_name[:2], True, (255, 255, 255))
         screen.blit(en, en.get_rect(center=(WIDTH - 200, 205)))
 
-        eht = self.F_SML.render("生命 %d / %d" % (max(0, self.e_hp), self.e_max_hp),
-                                True, TEXT)
-        screen.blit(eht, (WIDTH - 300, 290))
-        self.bar(screen, WIDTH - 300, 314, 200, 14, self.e_hp, self.e_max_hp, RED,
-                 (238, 236, 230))
+        self.hp_bar(screen, WIDTH - 200, 256, self.e_hp, self.e_max_hp)
 
         if self.e_block > 0:
-            pygame.draw.circle(screen, ACCENT, (WIDTH - 290, 340), 16)
+            pygame.draw.circle(screen, ACCENT, (WIDTH - 290, 308), 16)
             bl = self.F_SML.render(str(self.e_block), True, (255, 255, 255))
-            screen.blit(bl, bl.get_rect(center=(WIDTH - 290, 340)))
+            screen.blit(bl, bl.get_rect(center=(WIDTH - 290, 308)))
 
         intent = {"attack": "攻击 %d" % self.e_intent_val,
                   "block": "防御 8",
                   "buff": "强化 +3"}[self.e_intent]
         icol = {"attack": RED, "block": ACCENT, "buff": PURPLE}[self.e_intent]
         ii = self.F_SML.render("意图：" + intent, True, icol)
-        screen.blit(ii, (WIDTH - 300, 358))
+        screen.blit(ii, (WIDTH - 300, 334))
 
         # ---------- 战报 ----------
         lb = pygame.Rect(70, 420, 320, 250)
@@ -624,3 +643,40 @@ class BattleScene:
     def panel(self, screen, rect, radius=12):
         pygame.draw.rect(screen, PANEL, rect, border_radius=radius)
         pygame.draw.rect(screen, PANEL_LINE, rect, 1, border_radius=radius)
+
+    def hp_bar(self, screen, cx, y, cur, mx, w=210, h=22):
+        """一条血条：水平居中在 cx，顶边在 y。血量数字**压在条里面**。
+
+        设计要点：
+          · 数字放进条里 -> 不用再单独占一行文字，视觉更干净，
+            也正好能把条紧贴在角色头像下面
+          · 颜色随剩余比例变（绿 -> 琥珀 -> 红）—— 不读数字也知道危不危险
+          · 数字画两层（深色描边 + 白字），浅色底和深色底上都看得清
+        """
+        cur = max(0, cur)
+        mx = max(1, mx)
+        ratio = min(1.0, float(cur) / mx)
+
+        r = pygame.Rect(int(cx - w / 2), int(y), int(w), int(h))
+        # 底槽（未填充部分）
+        pygame.draw.rect(screen, (216, 213, 204), r, border_radius=h // 2)
+        pygame.draw.rect(screen, (200, 197, 188), r, 1, border_radius=h // 2)
+
+        inner = r.inflate(-4, -4)
+        fw = int(round(inner.width * ratio))
+        if ratio > 0:
+            # 至少留一个圆头的宽度，否则低血量时条会缩成看不见的一点
+            fw = max(fw, inner.height)
+            col = ((86, 152, 46) if ratio > 0.55 else
+                   (214, 148, 30) if ratio > 0.28 else
+                   (196, 62, 58))
+            pygame.draw.rect(screen, col,
+                             pygame.Rect(inner.x, inner.y, fw, inner.height),
+                             border_radius=inner.height // 2)
+
+        txt = "%d / %d" % (cur, mx)
+        shadow = self.F_SML.render(txt, True, (46, 42, 38))
+        white = self.F_SML.render(txt, True, (255, 255, 255))
+        c = r.center
+        screen.blit(shadow, shadow.get_rect(center=(c[0] + 1, c[1] + 1)))
+        screen.blit(white, white.get_rect(center=c))

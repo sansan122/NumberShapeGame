@@ -169,9 +169,9 @@ def main():
 
     # ---- 顺带打个 zip，方便直接发 ----
     zip_path = RELEASE.parent / "数与形-公理塔.zip"
+    zip_old = RELEASE.parent / "_old_数与形-公理塔.zip"
     if zip_path.exists():
         # 同样用改名腾位置，别 unlink（会累加删除计数）
-        zip_old = RELEASE.parent / "_old_数与形-公理塔.zip"
         if zip_old.exists():
             zip_old.unlink()
         zip_path.rename(zip_old)
@@ -180,6 +180,15 @@ def main():
             z.write(f, arcname="数与形/" + f.name)
     print("\n  已打包 zip：%s（%.1f MB）"
           % (zip_path.name, zip_path.stat().st_size / 1024 / 1024))
+
+    # 新 zip 已经落好了，这时候才删旧的。
+    # （曾经漏了这一步：每重打包一次就白留一个 26MB 的 _old_*.zip）
+    if zip_old.exists():
+        try:
+            zip_old.unlink()
+            print("  旧的 zip 已清理")
+        except OSError:
+            print("  ! 旧 zip 删不掉，手动删一下：%s" % zip_old)
 
     print("\n" + "=" * 56)
     print("完成。可以把这个发出去：")
