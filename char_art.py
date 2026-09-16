@@ -16,8 +16,10 @@
      调用方退回原来的「符号 + 颜色」占位画法。
   2. **资源路径一律走 game_env.resource_path** —— 打包后资源
      在 sys._MEIPASS 临时目录，`Path(__file__).parent` 会找错地方。
-  3. **缩放结果要缓存** —— smoothscale 不便宜，同一尺寸每帧
-     重算一次会让战斗掉帧。所有缩放按 (高度, 宽度) 记在字典里。
+  3. **缩放结果要缓存，但键必须带帧身份** —— smoothscale 不便宜，
+     同一帧重复缩放会让战斗掉帧；可所有帧尺寸相同（联合 bbox 裁剪），
+     按 (高度, 宽度) 记键会让第一帧结果被全部帧共用、动画冻在第一帧，
+     必须用 (高度, id(帧)) 记键。两条都真踩过。
 """
 
 from pathlib import Path
@@ -147,8 +149,14 @@ class CharArt:
 
     # ---------------- 绘制 ----------------
     def _scaled_frame(self, surf, height, cache):
-        """按目标高度缩放（宽等比），结果缓存。"""
-        key = (height, surf.get_width())
+        """按目标高度缩放（宽等比），结果缓存。
+
+        缓存键必须带上「是哪一帧」(用 id(surf))：预处理把所有帧裁成
+        同一个联合 bbox，尺寸全部相同，只按 (高度, 宽度) 记键的话
+        第一帧的缩放结果会被所有帧共用 —— 动画就永远停在第一帧。
+        （真踩过的坑：立绘显示正常但一动不动，就是它。）
+        """
+        key = (height, id(surf))
         if key not in cache:
             ratio = height / surf.get_height()
             w = max(1, round(surf.get_width() * ratio))
