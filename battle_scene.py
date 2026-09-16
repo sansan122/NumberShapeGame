@@ -150,9 +150,17 @@ class BattleScene:
         self.F_TINY = E.load_font(14)
 
         # ---- 布局 ----
-        self.BTN_END = pygame.Rect(1080, 620, 160, 56)
+        self.BTN_END = pygame.Rect(1112, 545, 160, 56)
         self.BTN_SUBMIT = pygame.Rect(560, 492, 160, 46)
         self.QUIZ_BOX = pygame.Rect(380, 300, 520, 290)
+
+        # ---- 舞台锚点（杀戮尖塔式：角色立于场地左右，血条画在脚边）----
+        self.P_X, self.P_FOOT = 250, 486      # 玩家：站位 / 脚底
+        self.P_SYM_CY = 360                   # 无立绘时占位圆的圆心
+        self.E_X = 1000                       # 敌人站位
+        # 敌人体型随档次变大（底边统一落在 y=435 的「地面」上）
+        self.E_R = {"battle": 78, "elite": 88, "boss": 100}.get(self.kind, 84)
+        self.E_CY = 435 - self.E_R
 
         self.layout_hand()  # 先算一次手牌位置，保证第一帧点得到
 
@@ -397,16 +405,21 @@ class BattleScene:
 
     # ==================== 绘制 ====================
     def layout_hand(self):
-        """计算手牌位置。"""
+        """计算手牌位置。牌多时向中间叠起来（像杀戮尖塔那样互相叠压），
+        给左右两角的能量球 / 牌堆图标让位。"""
         n = len(self.hand)
         if n == 0:
             return
         gap = 16
         total = n * CARD_W + (n - 1) * gap
+        if total > 940:
+            total = 940
+            # 间距算成负数 -> 卡牌左右叠压；后画的压在先画的上面
+            gap = (940 - n * CARD_W) / max(1, n - 1)
         x0 = WIDTH // 2 - total // 2
         y0 = HEIGHT - CARD_H - 26
         for i, c in enumerate(self.hand):
-            c.rect = pygame.Rect(x0 + i * (CARD_W + gap), y0, CARD_W, CARD_H)
+            c.rect = pygame.Rect(int(x0 + i * (CARD_W + gap)), y0, CARD_W, CARD_H)
 
     # ==================== 背景（美术布置） ====================
     def draw_backdrop(self, screen, t_ms):
@@ -524,14 +537,109 @@ class BattleScene:
         """
         # 中央淡色竖线，像对战场地的分界
         cx = WIDTH // 2
-        pygame.draw.line(screen, BATTLE_LINE, (cx, 80), (cx, 400), 2)
+        pygame.draw.line(screen, BATTLE_LINE, (cx, 80), (cx, 430), 2)
 
-        # 呼吸的「对决」光点，画在玩家与敌人头像之间的中点
-        my = 205
+        # 呼吸的「对决」光点，画在玩家与敌人之间的中点
+        my = 300
         pulse = 3 + int(2 * (1 + math.sin(t_ms / 500.0)))
         pygame.draw.circle(screen, BATTLE_LINE, (cx, my), 26)
         pygame.draw.circle(screen, (208, 214, 226), (cx, my), 14 + pulse, 2)
         pygame.draw.circle(screen, (180, 190, 208), (cx, my), 4)
+
+    # ==================== 舞台（杀戮尖塔式布局） ====================
+    def draw_stage(self, screen):
+        """对峙舞台：玩家大立绘在左、敌人在右，都「站」在地面上，
+        血条和格挡画在角色脚边，意图悬在敌人头顶。
+
+        参照杀戮尖塔的战斗排版重做：场面开阔，不再用面板框住角色，
+        角色体型放大到撑得起场面；名字、金币这些信息收进顶栏。
+        """
+        ch = self.player.char
+
+        # ---- 左：玩家 ----
+        self._ground_shadow(screen, (self.P_X, 492), 190)
+        # 有立绘就画大号像素小人（高 280，脚点 y=486，站在影子上）；
+        # 没素材的角色用大号符号圆占位，规格和敌人一致
+        if not self.p_anim.draw(screen, (self.P_X, self.P_FOOT), 280):
+            pygame.draw.circle(screen, GLOW_ALLY,
+                               (self.P_X, self.P_SYM_CY), self.E_R + 10)
+            pygame.draw.circle(screen, ch["color"],
+                               (self.P_X, self.P_SYM_CY), self.E_R)
+            pygame.draw.circle(screen, (255, 255, 255),
+                               (self.P_X, self.P_SYM_CY), self.E_R, 2)
+            icon = self.F_BIG.render(ch["icon"], True, (255, 255, 255))
+            screen.blit(icon, icon.get_rect(center=(self.P_X, self.P_SYM_CY)))
+
+        # 血条贴着脚边，格挡徽章在条左外侧
+        self.hp_bar(screen, self.P_X, 494, self.p_hp, self.p_max_hp)
+        self._block_badge(screen, (self.P_X - 122, 505), self.p_block)
+
+        # ---- 右：敌人 ----
+        # 意图框悬在头顶（下回合要干什么，提前告诉你）
+        intent = {"attack": "攻击 %d" % self.e_intent_val,
+                  "block": "防御 8",
+                  "buff": "强化 +3"}[self.e_intent]
+        icol = {"attack": RED, "block": ACCENT, "buff": PURPLE}[self.e_intent]
+        isoft = {"attack": RED_SOFT, "block": ACCENT_SOFT,
+                 "buff": PURPLE_SOFT}[self.e_intent]
+        ibox = pygame.Rect(0, 0, 116, 34)
+        ibox.center = (self.E_X, self.E_CY - self.E_R - 34)
+        pygame.draw.rect(screen, isoft, ibox, border_radius=17)
+        pygame.draw.rect(screen, icol, ibox, 2, border_radius=17)
+        it = self.F_SML.render(intent, True, icol)
+        screen.blit(it, it.get_rect(center=ibox.center))
+
+        self._ground_shadow(screen, (self.E_X, 492), 190)
+        pygame.draw.circle(screen, GLOW_FOE, (self.E_X, self.E_CY), self.E_R + 10)
+        pygame.draw.circle(screen, RED, (self.E_X, self.E_CY), self.E_R)
+        pygame.draw.circle(screen, (255, 255, 255),
+                           (self.E_X, self.E_CY), self.E_R, 2)
+        # 圆里只放名字前两个字（完整名字写在血条右侧，不占手牌区）
+        en = self.F_BIG.render(self.e_name[:2], True, (255, 255, 255))
+        screen.blit(en, en.get_rect(center=(self.E_X, self.E_CY)))
+
+        self.hp_bar(screen, self.E_X, 494, self.e_hp, self.e_max_hp)
+        self._block_badge(screen, (self.E_X - 122, 505), self.e_block)
+        nt = self.F_SML.render(self.e_name, True, TEXT_MUTE)
+        screen.blit(nt, (self.E_X + 114, 497))
+
+    def _ground_shadow(self, screen, center, w):
+        """角色脚下的一片椭圆影子，把人「钉」在地面上。"""
+        r = pygame.Rect(0, 0, w, 24)
+        r.center = center
+        pygame.draw.ellipse(screen, (225, 227, 222), r)
+
+    def _block_badge(self, screen, center, block):
+        """格挡徽章：蓝色圆片 + 白字，画在血条外侧（有格挡才出现）。"""
+        if block <= 0:
+            return
+        pygame.draw.circle(screen, ACCENT, center, 16)
+        pygame.draw.circle(screen, (255, 255, 255), center, 16, 2)
+        bl = self.F_SML.render(str(block), True, (255, 255, 255))
+        screen.blit(bl, bl.get_rect(center=center))
+
+    def draw_energy(self, screen):
+        """左下角能量球：大圆盘 + 「当前/上限」，取代原来的一排小圆点。"""
+        cx, cy, r = 84, 588, 40
+        pygame.draw.circle(screen, AMBER_SOFT, (cx, cy), r + 6)
+        pygame.draw.circle(screen, AMBER, (cx, cy), r)
+        pygame.draw.circle(screen, (255, 255, 255), (cx, cy), r, 2)
+        txt = "%d/%d" % (self.p_energy, self.p_max_energy)
+        sh = self.F_MID.render(txt, True, (46, 42, 38))
+        wt = self.F_MID.render(txt, True, (255, 255, 255))
+        screen.blit(sh, sh.get_rect(center=(cx + 1, cy + 1)))
+        screen.blit(wt, wt.get_rect(center=(cx, cy)))
+
+    def draw_pile(self, screen, cx, cy, count):
+        """角落的牌堆图标：两张错开的小卡 + 琥珀色数量角标。"""
+        for dx, dy in ((4, 4), (0, 0)):
+            r = pygame.Rect(cx - 17 + dx, cy - 23 + dy, 34, 46)
+            pygame.draw.rect(screen, CARD_FACE, r, border_radius=6)
+            pygame.draw.rect(screen, PANEL_LINE, r, 1, border_radius=6)
+        pygame.draw.circle(screen, AMBER, (cx + 16, cy + 20), 13)
+        pygame.draw.circle(screen, (255, 255, 255), (cx + 16, cy + 20), 13, 1)
+        num = self.F_SML.render(str(count), True, (255, 255, 255))
+        screen.blit(num, num.get_rect(center=(cx + 16, cy + 20)))
 
     def draw(self, screen, mouse, t_ms):
         screen.fill(BG)
@@ -539,104 +647,43 @@ class BattleScene:
         self.draw_battle_stage(screen, t_ms)
         self.layout_hand()
 
-        # ---------- 顶部 ----------
+        # ---------- 顶栏（角色名在左，金币 / 回合 / 牌组提示在右）----------
         top = pygame.Rect(0, 0, WIDTH, 52)
         pygame.draw.rect(screen, PANEL, top)
         pygame.draw.line(screen, PANEL_LINE, (0, 52), (WIDTH, 52))
-        t1 = self.F_MID.render("《数与形》　卡牌战斗", True, TEXT)
+        ch = self.player.char
+        t1 = self.F_MID.render("%s · %s" % (ch["name"], ch["title"]), True, TEXT)
         screen.blit(t1, (24, 13))
+
         t2 = self.F_SML.render("回合 %d" % self.turn, True, TEXT_MUTE)
         screen.blit(t2, (WIDTH - 130, 18))
-
-        # 牌堆计数 + 「看牌组」提示。
-        # 有了这两个数字 + 牌组面板，玩家能自己核对：
-        #     抽牌堆 + 手牌 + 弃牌堆 = 牌组总张数
-        # 出牌/弃牌对不上时一眼能看出来。
-        pile = self.F_SML.render(
-            "抽牌堆 %d　弃牌堆 %d" % (len(self.deck), len(self.discard)),
-            True, TEXT_MUTE)
-        px = WIDTH - 148 - pile.get_width()
-        screen.blit(pile, (px, 18))
-
         hint = self.F_SML.render("D 查看牌组", True, ACCENT)
-        screen.blit(hint, (px - 22 - hint.get_width(), 18))
+        hx = WIDTH - 130 - 24 - hint.get_width()
+        screen.blit(hint, (hx, 18))
+        # 金币：小硬币 + 数字（抽/弃牌堆的计数挪到了左右下角的牌堆图标上）
+        gt = self.F_SML.render(str(self.player.gold), True, TEXT)
+        gx = hx - 24 - gt.get_width() - 22
+        pygame.draw.circle(screen, AMBER, (gx, 27), 9)
+        pygame.draw.circle(screen, (255, 255, 255), (gx, 27), 9, 1)
+        screen.blit(gt, (gx + 14, 18))
 
-        # ---------- 玩家区 ----------
-        ch = self.player.char
-        p_area = pygame.Rect(70, 130, 260, 250)
-        self.panel(screen, p_area)
-        # 面板主题色描边（角色色），让玩家侧一眼可辨
-        pygame.draw.rect(screen, tuple(ch["color"]), p_area, 2, border_radius=12)
+        # ---------- 舞台：角色立于场地左右（杀戮尖塔式布局） ----------
+        self.draw_stage(screen)
 
-        # 角色名放最上面一行，头像圆圈下面留给血条
-        pn = self.F_SML.render("%s · %s" % (ch["name"], ch["title"]), True, TEXT_MUTE)
-        screen.blit(pn, pn.get_rect(center=(200, 146)))
+        # ---------- 左下角：能量球 ----------
+        self.draw_energy(screen)
 
-        # 头像：有立绘素材就画像素小人（站在血条上方，随动作播放动画），
-        # 没素材保持符号占位（美术资源到位后换成贴图，位置不用动）
-        pygame.draw.circle(screen, GLOW_ALLY, (200, 205), 54)
-        if not self.p_anim.draw(screen, (200, 251), 92):
-            pygame.draw.circle(screen, ch["color"], (200, 205), 46)
-            pygame.draw.circle(screen, (255, 255, 255), (200, 205), 46, 2)
-            icon = self.F_BIG.render(ch["icon"], True, (255, 255, 255))
-            screen.blit(icon, icon.get_rect(center=(200, 205)))
-
-        # 血条 —— 就贴在头像正下方
-        self.hp_bar(screen, 200, 256, self.p_hp, self.p_max_hp)
-
-        # 格挡
-        if self.p_block > 0:
-            pygame.draw.circle(screen, ACCENT, (112, 308), 16)
-            bl = self.F_SML.render(str(self.p_block), True, (255, 255, 255))
-            screen.blit(bl, bl.get_rect(center=(112, 308)))
-
-        # 能量
-        en_lbl = self.F_SML.render("能量", True, TEXT_MUTE)
-        screen.blit(en_lbl, (100, 334))
-        for i in range(self.p_max_energy):
-            cx = 150 + i * 24
-            col = AMBER if i < self.p_energy else (228, 226, 218)
-            pygame.draw.circle(screen, col, (cx, 342), 9)
-
-        # ---------- 敌人区 ----------
-        e_area = pygame.Rect(WIDTH - 330, 130, 260, 250)
-        self.panel(screen, e_area)
-        # 敌人面板红色描边，和玩家（角色色）形成左右对峙
-        pygame.draw.rect(screen, RED, e_area, 2, border_radius=12)
-
-        enm = self.F_SML.render(self.e_name, True, TEXT_MUTE)
-        screen.blit(enm, enm.get_rect(center=(WIDTH - 200, 146)))
-
-        # 敌人头像：红色光晕 + 红底圆
-        pygame.draw.circle(screen, GLOW_FOE, (WIDTH - 200, 205), 54)
-        pygame.draw.circle(screen, RED, (WIDTH - 200, 205), 46)
-        pygame.draw.circle(screen, (255, 255, 255), (WIDTH - 200, 205), 46, 2)
-        # 圆圈里只放名字的前 2 个字：完整名字已经写在圆圈上面了，
-        # 塞 4 个字会横向撑出圆圈（22 号字 × 4 ≈ 88px，圆圈直径才 92px）
-        en = self.F_BIG.render(self.e_name[:2], True, (255, 255, 255))
-        screen.blit(en, en.get_rect(center=(WIDTH - 200, 205)))
-
-        self.hp_bar(screen, WIDTH - 200, 256, self.e_hp, self.e_max_hp)
-
-        if self.e_block > 0:
-            pygame.draw.circle(screen, ACCENT, (WIDTH - 290, 308), 16)
-            bl = self.F_SML.render(str(self.e_block), True, (255, 255, 255))
-            screen.blit(bl, bl.get_rect(center=(WIDTH - 290, 308)))
-
-        intent = {"attack": "攻击 %d" % self.e_intent_val,
-                  "block": "防御 8",
-                  "buff": "强化 +3"}[self.e_intent]
-        icol = {"attack": RED, "block": ACCENT, "buff": PURPLE}[self.e_intent]
-        ii = self.F_SML.render("意图：" + intent, True, icol)
-        screen.blit(ii, (WIDTH - 300, 334))
-
-        # ---------- 结束回合按钮 ----------
+        # ---------- 结束回合按钮（右下，弃牌堆上方） ----------
         if self.phase == "player" and not self.done:
             hover = self.BTN_END.collidepoint(mouse)
             col = (20, 78, 135) if hover else ACCENT
             pygame.draw.rect(screen, col, self.BTN_END, border_radius=10)
             bt = self.F_MID.render("结束回合", True, (255, 255, 255))
             screen.blit(bt, bt.get_rect(center=self.BTN_END.center))
+
+        # ---------- 左右下角的牌堆（抽牌在左、弃牌在右，计数在角标里） ----------
+        self.draw_pile(screen, 84, 672, len(self.deck))
+        self.draw_pile(screen, 1196, 672, len(self.discard))
 
         # ---------- 手牌 ----------
         for c in self.hand:
