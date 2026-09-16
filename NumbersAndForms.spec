@@ -40,6 +40,15 @@ datas = [
     (str(ROOT / "map_tools" / "data" / "tower.yaml"), "map_tools/data"),
 ]
 
+# 角色立绘与动作帧（assets/chars/{角色id}/*.png，约 1 MB）。
+# char_art.py 运行时按 resource_path("assets", "chars", ...) 读取，
+# 素材缺失时代码会自动退回符号占位，所以就算漏带也只是「没有小人」，不会崩。
+if (ROOT / "assets" / "chars").is_dir():
+    for char_dir in sorted((ROOT / "assets" / "chars").iterdir()):
+        if char_dir.is_dir():
+            for png in sorted(char_dir.glob("*.png")):
+                datas.append((str(png), "assets/chars/%s" % char_dir.name))
+
 # 字体：挑一个存在的就打进去（用户机器上有没有都无所谓，有兜底链）
 for font in ("msyh.ttc", "msyh.ttf", "simhei.ttf", "simsun.ttc"):
     p = Path("C:/Windows/Fonts") / font
@@ -69,6 +78,7 @@ a = Analysis(
         "save_system",
         "ui_scenes",
         "game_env",
+        "char_art",
         "yaml",
     ],
     hookspath=[],

@@ -17,6 +17,7 @@
 
 import pygame
 
+import char_art
 import game_env as E
 import player as P
 import save_system
@@ -336,16 +337,18 @@ class CharSelectScene:
             pygame.draw.line(surf, col, (r.x + 12, r.y + 2),
                              (r.right - 12, r.y + 2), 5)
 
-        # ---- 头像占位：大方框 + 大符号 + 「美术待补」 ----
+        # ---- 头像：有立绘就放像素小人立绘，没素材保持符号占位 ----
         pr = sub["portrait"]
         draw_box(surf, pr, fill=(247, 246, 241), border=col,
                  width=2, shadow=False)
-        # 用大符号本身当占位图，居中放
-        big = _font(64)
-        center_text(surf, c["icon"], big, col, pr.centerx, pr.centery + 6)
-        # 角落一行小字，说明这里以后是立绘
-        tag = self.f_tiny.render("头像占位", True, TEXT_FAINT)
-        surf.blit(tag, (pr.right - tag.get_width() - 10, pr.y + 6))
+        art = char_art.get_char_art(c["id"])
+        if not art.draw_static(surf, pr):
+            # 用大符号本身当占位图，居中放
+            big = _font(64)
+            center_text(surf, c["icon"], big, col, pr.centerx, pr.centery + 6)
+            # 角落一行小字，说明这里以后是立绘
+            tag = self.f_tiny.render("头像占位", True, TEXT_FAINT)
+            surf.blit(tag, (pr.right - tag.get_width() - 10, pr.y + 6))
 
         # ---- 名字 / 称号 ----
         center_text(surf, c["name"], self.f_name, TEXT,

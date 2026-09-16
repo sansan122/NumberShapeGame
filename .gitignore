@@ -18,3 +18,7 @@ release/
 
 # 重打包时用来腾位置的临时名字（打完包应该自己消失）
 *.old
+
+# 美术源文件（Aseprite 工程和原始 GIF，由作者自己保管；
+# 仓库只收 assets/ 下的派生帧图，可用 tmp/prepare_char_art.py 重新生成）
+人物/

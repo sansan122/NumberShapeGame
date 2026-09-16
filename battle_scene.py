@@ -26,6 +26,7 @@ import random
 import pygame
 
 import game_env as E
+import char_art
 from player import Card
 
 # ==================== 配色 ====================
@@ -101,6 +102,8 @@ class BattleScene:
         self.p_block = 0
         self.p_energy = 3
         self.p_max_energy = 3
+        # 玩家立绘动画（无素材的角色 has_art=False，draw 会退回符号占位）
+        self.p_anim = char_art.get_char_art(player.char_id)
 
         # ---- 敌人侧 ----
         self.e_name = cfg["name"]
@@ -219,6 +222,7 @@ class BattleScene:
             actual = max(0, dmg - self.e_block)
             self.e_block = max(0, self.e_block - dmg)
             self.e_hp -= actual
+            self.p_anim.play("attack")     # 打出伤害 -> 播攻击动作
             self.log.insert(0, "造成 %d 点伤害" % actual)
 
         if "block" in eff:
@@ -277,7 +281,11 @@ class BattleScene:
             actual = max(0, dmg - self.p_block)
             self.p_block = max(0, self.p_block - dmg)
             self.p_hp -= actual
-            self.log.insert(0, "敌人攻击，造成 %d 点伤害" % actual)
+            if actual > 0:
+                self.p_anim.play("hit")    # 真的挨了打 -> 播受击动作
+                self.log.insert(0, "敌人攻击，造成 %d 点伤害" % actual)
+            else:
+                self.log.insert(0, "敌人攻击，被格挡挡下了")
         elif self.e_intent == "block":
             self.e_block += 8
             self.log.insert(0, "敌人获得 8 点格挡")
@@ -378,6 +386,8 @@ class BattleScene:
         return None
 
     def update(self, dt):
+        # 推进玩家立绘动画（dt 是秒，帧时长是毫秒）
+        self.p_anim.tick(dt * 1000.0)
         # 敌人回合的自动推进
         if self.phase == "enemy" and not self.done:
             self._enemy_t = getattr(self, "_enemy_t", 0) + dt
@@ -562,13 +572,14 @@ class BattleScene:
         pn = self.F_SML.render("%s · %s" % (ch["name"], ch["title"]), True, TEXT_MUTE)
         screen.blit(pn, pn.get_rect(center=(200, 146)))
 
-        # 头像：先用角色符号占位（美术资源到位后换成贴图，位置不用动）
-        # 外圈光晕 + 内圈底色，让头像不再是光秃秃一个圆
+        # 头像：有立绘素材就画像素小人（站在血条上方，随动作播放动画），
+        # 没素材保持符号占位（美术资源到位后换成贴图，位置不用动）
         pygame.draw.circle(screen, GLOW_ALLY, (200, 205), 54)
-        pygame.draw.circle(screen, ch["color"], (200, 205), 46)
-        pygame.draw.circle(screen, (255, 255, 255), (200, 205), 46, 2)
-        icon = self.F_BIG.render(ch["icon"], True, (255, 255, 255))
-        screen.blit(icon, icon.get_rect(center=(200, 205)))
+        if not self.p_anim.draw(screen, (200, 251), 92):
+            pygame.draw.circle(screen, ch["color"], (200, 205), 46)
+            pygame.draw.circle(screen, (255, 255, 255), (200, 205), 46, 2)
+            icon = self.F_BIG.render(ch["icon"], True, (255, 255, 255))
+            screen.blit(icon, icon.get_rect(center=(200, 205)))
 
         # 血条 —— 就贴在头像正下方
         self.hp_bar(screen, 200, 256, self.p_hp, self.p_max_hp)

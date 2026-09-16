@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pygame
 
+import char_art
 import game_env as E
 
 # 打包成 exe 后 __file__ 指向临时解包目录，所以一律用 game_env 算路径
@@ -468,9 +469,20 @@ class MapScene:
             it = self.F_ICON.render(icon, True, icol)
             screen.blit(it, it.get_rect(center=(sx, sy)))
 
-            # 当前位置加个小人标记
+            # 当前位置加个小人标记：有立绘素材就让像素小人站在节点上
+            # （待机动画），没素材保持原来的金色小圆点
             if is_cur:
-                pygame.draw.circle(screen, GOLD, (sx, sy - NODE_R - 14), 6)
+                cid = None
+                if self.player is not None:
+                    ch = getattr(self.player, "char", None)
+                    if ch:
+                        cid = ch.get("id")
+                drawn = False
+                if cid:
+                    drawn = char_art.draw_idle(
+                        screen, cid, (sx, sy - NODE_R - 2), 42, t_ms)
+                if not drawn:
+                    pygame.draw.circle(screen, GOLD, (sx, sy - NODE_R - 14), 6)
 
         # ---------- 3. 顶部信息栏 ----------
         self.draw_topbar(screen)
