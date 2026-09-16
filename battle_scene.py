@@ -48,6 +48,15 @@ CARD_FACE   = (255, 255, 255)
 CARD_SEL    = (255, 244, 200)
 SHADOW      = (228, 226, 218)
 
+# ---- 战斗背景（渐变 + 装饰，纯代码绘制，无外部贴图）----
+BG_TOP      = (240, 244, 250)   # 背景渐变：顶部偏冷蓝
+BG_BOT      = (248, 244, 238)   # 底部偏暖米
+FLOOR       = (226, 232, 240)   # 地面 / 地平线
+DECO_SYMBOL = (222, 228, 238)   # 漂浮数学符号（淡，不抢字）
+GLOW_ALLY   = (200, 224, 248)   # 玩家头像外圈光晕
+GLOW_FOE    = (248, 216, 216)   # 敌人头像外圈光晕
+BATTLE_LINE = (232, 236, 244)   # 中央对决区底衬
+
 WIDTH, HEIGHT = 1280, 720
 CARD_W, CARD_H = 132, 176
 
@@ -386,8 +395,65 @@ class BattleScene:
         for i, c in enumerate(self.hand):
             c.rect = pygame.Rect(x0 + i * (CARD_W + gap), y0, CARD_W, CARD_H)
 
+    # ==================== 背景（美术布置） ====================
+    def draw_backdrop(self, screen, t_ms):
+        """战斗背景：垂直渐变 + 地面线 + 漂浮数学符号。
+
+        全部用代码画（不依赖贴图），因为项目是「免安装单 exe」，
+        带资源文件会很麻烦。渐变方向：顶部偏冷蓝、底部偏暖米，
+        营造「塔内由冷转暖」的空间纵深感。
+        """
+        # 1) 垂直渐变（逐行插值，比一整块纯色有层次）
+        for y in range(HEIGHT):
+            t = y / max(1, HEIGHT - 1)
+            r = int(BG_TOP[0] + (BG_BOT[0] - BG_TOP[0]) * t)
+            g = int(BG_TOP[1] + (BG_BOT[1] - BG_TOP[1]) * t)
+            b = int(BG_TOP[2] + (BG_BOT[2] - BG_TOP[2]) * t)
+            pygame.draw.line(screen, (r, g, b), (0, y), (WIDTH, y))
+
+        # 2) 地面：底部一条浅色地平线，把手牌区「托」起来
+        pygame.draw.rect(screen, FLOOR, (0, HEIGHT - CARD_H - 52, WIDTH, CARD_H + 52))
+        pygame.draw.line(screen, (210, 217, 228),
+                         (0, HEIGHT - CARD_H - 52), (WIDTH, HEIGHT - CARD_H - 52), 2)
+
+        # 3) 漂浮的数学符号（半透明，慢速上下漂移，呼应「数与形」主题）
+        symbols = ["∑", "√", "π", "∞", "△", "=", "×", "∫"]
+        spots = [
+            (150, 120), (420, 90), (700, 130), (980, 100),
+            (300, 210), (620, 200), (900, 210), (1180, 170),
+            (80, 320), (1150, 340),
+        ]
+        big = E.load_font(64)
+        for i, (sym, (sx, sy)) in enumerate(zip(symbols, spots)):
+            # 用 t_ms 做正弦漂移，每个符号相位/幅度不同，看起来是「漂浮」而非固定
+            phase = i * 0.7
+            amp = 6 + (i % 3) * 3
+            dy = int(amp * math.sin(t_ms / 1400.0 + phase))
+            # 半透明：画到一张带 alpha 的临时表面再 blit
+            s = big.render(sym, True, DECO_SYMBOL)
+            s.set_alpha(90)
+            screen.blit(s, s.get_rect(center=(sx, sy + dy)))
+
+    def draw_battle_stage(self, screen, t_ms):
+        """玩家和敌人之间的「对决区」：一条淡色中线 + 呼吸光点。
+
+        把原本空荡荡的中央填上一点存在感，又不抢注意力。
+        """
+        # 中央淡色竖线，像对战场地的分界
+        cx = WIDTH // 2
+        pygame.draw.line(screen, BATTLE_LINE, (cx, 80), (cx, 400), 2)
+
+        # 呼吸的「对决」光点，画在玩家与敌人头像之间的中点
+        my = 205
+        pulse = 3 + int(2 * (1 + math.sin(t_ms / 500.0)))
+        pygame.draw.circle(screen, BATTLE_LINE, (cx, my), 26)
+        pygame.draw.circle(screen, (208, 214, 226), (cx, my), 14 + pulse, 2)
+        pygame.draw.circle(screen, (180, 190, 208), (cx, my), 4)
+
     def draw(self, screen, mouse, t_ms):
         screen.fill(BG)
+        self.draw_backdrop(screen, t_ms)
+        self.draw_battle_stage(screen, t_ms)
         self.layout_hand()
 
         # ---------- 顶部 ----------
@@ -413,16 +479,21 @@ class BattleScene:
         screen.blit(hint, (px - 22 - hint.get_width(), 18))
 
         # ---------- 玩家区 ----------
+        ch = self.player.char
         p_area = pygame.Rect(70, 130, 260, 250)
         self.panel(screen, p_area)
+        # 面板主题色描边（角色色），让玩家侧一眼可辨
+        pygame.draw.rect(screen, tuple(ch["color"]), p_area, 2, border_radius=12)
 
         # 角色名放最上面一行，头像圆圈下面留给血条
-        ch = self.player.char
         pn = self.F_SML.render("%s · %s" % (ch["name"], ch["title"]), True, TEXT_MUTE)
         screen.blit(pn, pn.get_rect(center=(200, 146)))
 
         # 头像：先用角色符号占位（美术资源到位后换成贴图，位置不用动）
+        # 外圈光晕 + 内圈底色，让头像不再是光秃秃一个圆
+        pygame.draw.circle(screen, GLOW_ALLY, (200, 205), 54)
         pygame.draw.circle(screen, ch["color"], (200, 205), 46)
+        pygame.draw.circle(screen, (255, 255, 255), (200, 205), 46, 2)
         icon = self.F_BIG.render(ch["icon"], True, (255, 255, 255))
         screen.blit(icon, icon.get_rect(center=(200, 205)))
 
@@ -446,11 +517,16 @@ class BattleScene:
         # ---------- 敌人区 ----------
         e_area = pygame.Rect(WIDTH - 330, 130, 260, 250)
         self.panel(screen, e_area)
+        # 敌人面板红色描边，和玩家（角色色）形成左右对峙
+        pygame.draw.rect(screen, RED, e_area, 2, border_radius=12)
 
         enm = self.F_SML.render(self.e_name, True, TEXT_MUTE)
         screen.blit(enm, enm.get_rect(center=(WIDTH - 200, 146)))
 
+        # 敌人头像：红色光晕 + 红底圆
+        pygame.draw.circle(screen, GLOW_FOE, (WIDTH - 200, 205), 54)
         pygame.draw.circle(screen, RED, (WIDTH - 200, 205), 46)
+        pygame.draw.circle(screen, (255, 255, 255), (WIDTH - 200, 205), 46, 2)
         # 圆圈里只放名字的前 2 个字：完整名字已经写在圆圈上面了，
         # 塞 4 个字会横向撑出圆圈（22 号字 × 4 ≈ 88px，圆圈直径才 92px）
         en = self.F_BIG.render(self.e_name[:2], True, (255, 255, 255))
