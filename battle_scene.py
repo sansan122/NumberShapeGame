@@ -53,6 +53,9 @@ BG_TOP      = (240, 244, 250)   # 背景渐变：顶部偏冷蓝
 BG_BOT      = (248, 244, 238)   # 底部偏暖米
 FLOOR       = (226, 232, 240)   # 地面 / 地平线
 DECO_SYMBOL = (222, 228, 238)   # 漂浮数学符号（淡，不抢字）
+DECO_LINE   = (234, 238, 246)   # 背景网格 / 函数曲线（比符号更淡）
+DECO_GRAPH  = (228, 234, 244)   # 几何图形描边
+DECO_FORMULA= (210, 216, 230)   # 公式文字（最淡可读层）
 GLOW_ALLY   = (200, 224, 248)   # 玩家头像外圈光晕
 GLOW_FOE    = (248, 216, 216)   # 敌人头像外圈光晕
 BATTLE_LINE = (232, 236, 244)   # 中央对决区底衬
@@ -416,12 +419,17 @@ class BattleScene:
         pygame.draw.line(screen, (210, 217, 228),
                          (0, HEIGHT - CARD_H - 52), (WIDTH, HEIGHT - CARD_H - 52), 2)
 
-        # 3) 漂浮的数学符号（半透明，慢速上下漂移，呼应「数与形」主题）
-        symbols = ["∑", "√", "π", "∞", "△", "=", "×", "∫"]
+        # 3) 数学装饰：坐标网格 / 函数曲线 / 几何图形 / 公式（都在前景之下）
+        self.draw_math_decor(screen)
+
+        # 4) 漂浮的数学符号（半透明，慢速上下漂移，呼应「数与形」主题）
+        symbols = ["∑", "√", "π", "∞", "△", "=", "×", "∫",
+                   "α", "β", "θ", "λ", "φ", "∈", "→", "≈"]
         spots = [
             (150, 120), (420, 90), (700, 130), (980, 100),
             (300, 210), (620, 200), (900, 210), (1180, 170),
-            (80, 320), (1150, 340),
+            (80, 320), (1150, 340), (540, 70), (1080, 60),
+            (240, 90), (860, 330), (60, 200), (1220, 250),
         ]
         big = E.load_font(64)
         for i, (sym, (sx, sy)) in enumerate(zip(symbols, spots)):
@@ -433,6 +441,71 @@ class BattleScene:
             s = big.render(sym, True, DECO_SYMBOL)
             s.set_alpha(90)
             screen.blit(s, s.get_rect(center=(sx, sy + dy)))
+
+    def draw_math_decor(self, screen):
+        """在渐变背景上铺一层数学元素：网格、函数曲线、几何图形、公式。
+
+        全部用极淡的颜色，画在玩家/敌人面板之下，只做氛围、不抢前景。
+        坐标都是固定值（不引入随机抖动），保证画面稳定、可测试。
+
+        布局约束（必须避开前景）：
+          玩家面板 x70~330 / y130~380；敌人面板 x950~1210 / y130~380；
+          顶部标题栏 y0~52；中央竖线 cx=640。
+        可见区 = 顶部横带 y60~125 + 中央区 x340~940（y60~470）。
+        """
+        # ---- 3.1 坐标网格：淡色横竖细线，像坐标纸 ----
+        # 只在中央可见区铺网格，避开左右面板
+        gy0, gy1 = 70, 470
+        for gx in range(360, 940, 90):
+            pygame.draw.line(screen, DECO_LINE, (gx, gy0), (gx, gy1), 1)
+        for gy in range(gy0, gy1, 60):
+            pygame.draw.line(screen, DECO_LINE, (340, gy), (930, gy), 1)
+
+        # ---- 3.2 函数曲线：正弦波 + 抛物线，用折线绘制 ----
+        # 正弦波（中央区左半，起伏平缓，不压到面板）
+        pts = []
+        for x in range(360, 560):
+            y = 150 + int(22 * math.sin((x - 360) / 32.0))
+            pts.append((x, y))
+        if len(pts) > 1:
+            pygame.draw.lines(screen, DECO_GRAPH, False, pts, 2)
+
+        # 抛物线（中央区右半，开口朝上）
+        pts = []
+        for x in range(720, 920):
+            t = (x - 820) / 100.0
+            y = 180 + int(90 * t * t)
+            pts.append((x, y))
+        if len(pts) > 1:
+            pygame.draw.lines(screen, DECO_GRAPH, False, pts, 2)
+
+        # ---- 3.3 几何图形（描边，呼应「形」）----
+        # 圆（顶部横带，靠左）
+        pygame.draw.circle(screen, DECO_GRAPH, (430, 90), 26, 2)
+        # 正方形（中央区下段）
+        sq = pygame.Rect(500, 320, 38, 38)
+        pygame.draw.rect(screen, DECO_GRAPH, sq, 2)
+        # 三角形（中央区右段）
+        pygame.draw.polygon(screen, DECO_GRAPH,
+                            [(880, 330), (920, 330), (900, 298)], 2)
+        # 同心圆（中央区左段）
+        pygame.draw.circle(screen, DECO_GRAPH, (380, 300), 28, 2)
+        pygame.draw.circle(screen, DECO_GRAPH, (380, 300), 16, 1)
+
+        # ---- 3.4 公式（小字，最淡可读层）----
+        formulas = [
+            "E = mc²", "a² + b² = c²", "πr²", "y = f(x)",
+            "√2", "lim", "Σ", "d/dx",
+        ]
+        fpos = [
+            (420, 62), (830, 62), (660, 96), (560, 210),
+            (720, 380), (480, 430), (820, 430), (380, 200),
+        ]
+        f = E.load_font(22)
+        for txt, (fx, fy) in zip(formulas, fpos):
+            s = f.render(txt, True, DECO_FORMULA)
+            s.set_alpha(110)
+            screen.blit(s, s.get_rect(center=(fx, fy)))
 
     def draw_battle_stage(self, screen, t_ms):
         """玩家和敌人之间的「对决区」：一条淡色中线 + 呼吸光点。
