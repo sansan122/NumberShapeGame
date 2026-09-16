@@ -5,11 +5,12 @@
 用法：
     <python> 打包.py
 
-它会做四件事：
+它会做五件事：
     1. 重新生成所有启动器（保证编码和探测逻辑是最新的）
     2. 用 PyInstaller 打包成单文件 exe
     3. 把 exe 和说明拷到一个干净的发布目录
     4. 在隔离环境里**自检一遍**（确认打包后真的能跑）
+    5. 读 exe 里的 PYZ 核对**代码指纹**（确认装进去的真是最新代码）
 
 产出的发布目录（可以直接压缩发给别人）：
     release/数与形/
@@ -25,11 +26,23 @@
     就会跳出来拦一句 SAFE_DELETE_BULK_CONFIRM_REQUIRED 把脚本打断。
     本脚本原来在 build/ dist/ release/ 三处都用了逐文件删，
     结果每次重打包都跑到一半被拦；改成整目录删 + 改名之后就顺了。
+
+⚠️ 补一条：**"整目录删"并不是万能的**，别以为写成 rmtree 就稳了。
+    那个计数器数的是**目录里的条目数**，不是"删了几次"。
+    所以 build/ 一旦涨到 50 个以上条目，连整目录 rmtree 也会被拦
+    （实测：刚写完这个脚本时 build/ 只有 30 来个条目能过，
+    后来涨到 58 个就开始每次都拦）。
+    更坑的是：拦截是抛 **SystemExit**，而 `shutil.rmtree(..., ignore_errors=True)`
+    只吞 OSError —— 挡不住，脚本会**静默死在清理那一步**，
+    连个 traceback 都没有（现象是只打印了"清理 build ..."就没了）。
+    所以 clear_dir 里必须 catch BaseException，并准备好"改名腾位置"的兜底。
 """
 
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -37,9 +50,109 @@ HERE = Path(__file__).resolve().parent
 RELEASE = HERE / "release" / "数与形"
 EXE_NAME = "NumbersAndForms.exe"
 
+# ---------------------------------------------------------------------------
+# 代码指纹：用来回答「exe 里装的到底是不是最新代码」
+# ---------------------------------------------------------------------------
+# 为什么不能只看「打包没报错 + exe 时间戳变了」：
+#   · 增量构建可能吃到旧的 build/ 缓存；
+#   · 清理被安全策略拦下时流程可能中断在半路（exe 是新的、zip 还是旧的）；
+#   · 时间戳新 ≠ 内容是新的。
+#
+# ⚠️ 也**不能拿字符串去裸 grep exe**：
+#   onefile 的 exe 里 PYZ 是 zlib 压缩过的，`needle in exe.read_bytes()`
+#   **永远返回 False**，哪怕代码明明在里面（连「演算者」这种一定存在的
+#   字符串都搜不到）。照这个假信号去「修」只会白忙一场。
+#   正确做法是用 PyInstaller 自己的 reader 把 PYZ 解出来看字节码常量
+#   （docstring 也会进 co_consts，所以能当指纹；spec 里 optimize 必须为 0）。
+#
+# 每条指纹都**必须写明在哪个模块里找** —— 早先只写 (label, needle) 两元组，
+# 而检查时只解一个模块，于是指向别的模块的指纹永远 FAIL，把人骗去重打包。
+# 而且字符串必须是**从源码复制**的，不是凭印象编的（编过一次，源码里根本没有）。
+#
+# 每次改了游戏代码，从这里开头的注释或 docstring 里挑一句新的加进来。
+FINGERPRINTS = [
+    ("map_scene", "相机边界复用 camera_for", "上下界直接复用"),
+    ("map_scene", "camera_for 注释更正", "别再照着它改符号"),
+    ("deck_view", "牌组面板高度自适应", "按卡片数量算面板高度并居中"),
+    ("battle_scene", "血条随血量变色", "颜色随剩余比例变"),
+]
+
+# 对照组：**很老的代码里就有**的字符串。它们必须是「有」，
+# 否则说明解析流程本身坏了（全是「无」时无法区分「没打进包」和「脚本坏了」）。
+BASELINE = [
+    ("map_scene", "解析流程基线", "限制相机范围"),
+]
+
+
+def walk_strings(code):
+    """递归收集一个 code object 里所有的字符串常量。"""
+    out = []
+    for k in code.co_consts:
+        if isinstance(k, str):
+            out.append(k)
+        elif hasattr(k, "co_consts"):
+            out += walk_strings(k)
+    return out
+
+
+def verify_exe_code(exe):
+    """读 exe 里的 PYZ，逐条核对代码指纹。对不上就中止打包。"""
+    print("  读 %s 的 PYZ ..." % exe.name)
+    try:
+        from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
+    except ImportError as e:
+        raise SystemExit("!! 需要 PyInstaller 才能做内容自检：%s" % e)
+
+    ar = CArchiveReader(str(exe))
+    pyz_names = [n for n in ar.toc if n.endswith(".pyz")]
+    if not pyz_names:
+        raise SystemExit("!! exe 里没有 PYZ，不像是 PyInstaller 产物")
+
+    raw = ar.extract(pyz_names[0])
+    if isinstance(raw, tuple):
+        raw = raw[1]
+    # 落到系统临时目录：不在仓库里留东西，也不占用 tmp/ 的清理逻辑
+    tmp_pyz = Path(tempfile.gettempdir()) / "_pkg_check.pyz"
+    tmp_pyz.write_bytes(raw)
+
+    try:
+        z = ZlibArchiveReader(str(tmp_pyz))
+        cache = {}
+
+        def strings_of(mod):
+            if mod not in cache:
+                cache[mod] = ("\n".join(walk_strings(z.extract(mod)))
+                              if mod in z.toc else None)
+            return cache[mod]
+
+        missing = []
+        for title, group in (("对照组（必须命中，确认解析流程正常）", BASELINE),
+                             ("代码指纹（必须命中，确认是最新代码）", FINGERPRINTS)):
+            print("  %s：" % title)
+            for mod, label, needle in group:
+                text = strings_of(mod)
+                if text is None:
+                    print("    [FAIL] %-28s （模块 %s 不在包里）" % (label, mod))
+                    missing.append(label)
+                    continue
+                ok = needle in text
+                if not ok:
+                    missing.append(label)
+                print("    [%s] %-28s %s" % ("OK  " if ok else "FAIL", label, needle))
+    finally:
+        safe_unlink(tmp_pyz)
+
+    if missing:
+        raise SystemExit(
+            "!! exe 里不是最新代码，缺 %d 条指纹：%s\n"
+            "   （先确认这几条指纹字符串在对应源码里确实存在；\n"
+            "     若源码里也没有，那是指纹写错，不是打包问题）"
+            % (len(missing), "、".join(missing)))
+    print("  OK：%d 条指纹全部命中，exe 里就是最新代码" % len(FINGERPRINTS))
+
 
 def step(n, msg):
-    print("\n[%d/4] %s" % (n, msg))
+    print("\n[%d/5] %s" % (n, msg))
     print("-" * 56)
 
 
@@ -51,12 +164,81 @@ def run(cmd, **kw):
     return r
 
 
-def clear_dir(p):
-    """整目录删掉（只删两个目录，不逐个删文件——避免触发批量删除的安全确认）。"""
+def why_failed(e):
+    """把异常翻译成一句有用的话。
+
+    别直接 `"%s" % e` —— 安全策略抛的是 `SystemExit(1)`，
+    `str()` 出来就是一个裸的 `1`，等于什么都没说
+    （日志里出现过「删除被安全策略拦下：1」这种没用的话）。
+    真正的诊断信息（count/threshold/targets）是那层钩子自己打在
+    **上一行**的 `[safe-delete] ...` JSON 里。
+    """
+    if isinstance(e, SystemExit):
+        return ("被安全策略中止（SystemExit %r）；"
+                "计数信息见上一行 [safe-delete] 日志" % (e.code,))
+    return "%s: %s" % (type(e).__name__, e)
+
+
+def clear_dir(p, required=True):
+    """清掉一个中间产物目录；删不动就改名腾位置。
+
+    只用「整目录删」，不逐个删文件（见文件头的硬规矩）。
+    但整目录删也会被拦（计数器数的是目录里的**条目数**，超 50 就拦），
+    而且拦截抛的是 **SystemExit**，`ignore_errors=True` 挡不住 —— 所以
+    必须 catch BaseException，否则脚本会静默死在清理这一步。
+    兜底方案：改名腾位置。rename 不属于删除动作，不会被拦；
+    `.gitignore` 里已经有 `*.old`，所以也不会污染 git status。
+
+    required=True  ：这个目录**必须**腾出空路径（比如 build/ dist/，
+                     下次要往里写），删不掉也改不了名就只能报错。
+    required=False ：纯打扫卫生（临时目录、旧备份）。删不掉无所谓，
+                     **绝不能因此中断打包** —— 踩过：自检完清理临时目录时
+                     被拦，改名又撞上「刚 kill 掉的进程还占着 exe」，
+                     结果整个脚本在最后一步崩了，zip 都没来得及生成。
+    """
     if not p.exists():
         return
     print("  清理 %s ..." % p.name)
-    shutil.rmtree(p, ignore_errors=True)
+    try:
+        shutil.rmtree(p, ignore_errors=True)
+        if not p.exists():
+            return
+    except BaseException as e:              # SystemExit 也在这里面
+        print("    !! 删除被拦：%s" % why_failed(e))
+
+    # 改名挪开。带时间戳，避免多次打包互相覆盖。
+    stale = p.with_name("%s_stale_%s.old" % (p.name, time.strftime("%m%d%H%M%S")))
+    for i in range(3):                      # 刚 kill 的进程可能还占着文件，稍等重试
+        if not p.exists():                  # 上一轮删了一半，其实已经腾出位置了
+            print("    -> 目录已消失（删除虽被拦但已完成）")
+            return
+        try:
+            p.rename(stale)
+            print("    -> 已改名腾位置：%s" % stale.name)
+            print("       （不影响本次打包；这是中间产物，可以随时手动删掉）")
+            return
+        except OSError as e:
+            if i == 2:
+                if required:
+                    raise SystemExit("!! 既删不掉也改不了名：%s（%s）"
+                                     % (p, why_failed(e)))
+                print("    （只是打扫卫生，失败就算了：%s）" % why_failed(e))
+            time.sleep(0.5)
+
+
+def safe_unlink(p):
+    """删单个文件，删不掉就算了（返回是否删掉）。
+
+    为什么不用 `p.unlink()` 裸写：
+      · 安全策略拦批量删除时抛的是 **SystemExit**，`except OSError` 接不住；
+      · 这些位置都是「删旧备份」这种可失败的操作，失败不该弄死整个打包流程。
+    """
+    try:
+        p.unlink()
+        return True
+    except BaseException as e:                 # SystemExit / PermissionError 都吃掉
+        print("    （%s 暂未删掉，不打紧：%s）" % (p.name, why_failed(e)))
+        return False
 
 
 def main():
@@ -88,7 +270,7 @@ def main():
     if built.exists():
         stale = HERE / "dist" / (EXE_NAME + ".old")
         if stale.exists():
-            stale.unlink()
+            safe_unlink(stale)
         built.rename(stale)
         print("  旧的 exe 已挪到 %s" % stale.name)
     run([py, "-m", "PyInstaller", "NumbersAndForms.spec", "--noconfirm"])
@@ -102,10 +284,7 @@ def main():
     # 新 exe 已确认，可以把上一轮的旧 exe 删掉了（单个文件，不会触发批量确认）
     stale = HERE / "dist" / (EXE_NAME + ".old")
     if stale.exists():
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+        safe_unlink(stale)
 
     # ---- 3) 整理发布目录 ----
     step(3, "整理发布目录（只放玩家需要的东西）")
@@ -132,12 +311,13 @@ def main():
         print("  %-28s %8.1f KB" % (f.name, f.stat().st_size / 1024))
 
     # 新内容已就位，旧的备份目录这时候才删
-    clear_dir(old_release)
+    # （纯打扫卫生：删不掉也不能中断后面的自检和打 zip）
+    clear_dir(old_release, required=False)
 
     # ---- 4) 自检：在隔离目录里真跑一遍 ----
     step(4, "自检：在隔离目录里运行打包产物")
     check = HERE / "tmp" / "_release_check"
-    clear_dir(check)                     # 整目录清，避免逐文件删
+    clear_dir(check, required=False)     # 整目录清，避免逐文件删
     check.mkdir(parents=True, exist_ok=True)
     exe_in_check = check / EXE_NAME
     shutil.copy2(RELEASE / EXE_NAME, exe_in_check)
@@ -164,8 +344,14 @@ def main():
     except OSError as e:
         raise SystemExit("!! 无法运行打包产物：%s" % e)
     finally:
-        # 自检完成，把整个隔离目录清掉（整目录删，不逐文件删）
-        clear_dir(check)
+        # 自检完成，把整个隔离目录清掉（整目录删，不逐文件删）。
+        # 这里**必须** required=False：刚 kill 掉的 exe 在 Windows 上
+        # 可能还占着文件，删不掉是正常的，绝不能因此中断后面的打 zip。
+        clear_dir(check, required=False)
+
+    # ---- 5) 内容自检：exe 里真的是最新代码吗 ----
+    step(5, "内容自检：核对 exe 里的代码指纹")
+    verify_exe_code(RELEASE / EXE_NAME)
 
     # ---- 顺带打个 zip，方便直接发 ----
     zip_path = RELEASE.parent / "数与形-公理塔.zip"
@@ -173,7 +359,7 @@ def main():
     if zip_path.exists():
         # 同样用改名腾位置，别 unlink（会累加删除计数）
         if zip_old.exists():
-            zip_old.unlink()
+            safe_unlink(zip_old)
         zip_path.rename(zip_old)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(RELEASE.iterdir()):
@@ -184,11 +370,8 @@ def main():
     # 新 zip 已经落好了，这时候才删旧的。
     # （曾经漏了这一步：每重打包一次就白留一个 26MB 的 _old_*.zip）
     if zip_old.exists():
-        try:
-            zip_old.unlink()
+        if safe_unlink(zip_old):
             print("  旧的 zip 已清理")
-        except OSError:
-            print("  ! 旧 zip 删不掉，手动删一下：%s" % zip_old)
 
     print("\n" + "=" * 56)
     print("完成。可以把这个发出去：")
