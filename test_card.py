@@ -155,7 +155,6 @@ class Game:
         self.p_block = 0
         self.p_energy = 3
         self.p_max_energy = 3
-        self.p_residue = 0          # 形值
 
         # 敌人
         self.e_hp = 50
@@ -254,8 +253,7 @@ class Game:
             actual = max(0, dmg - self.e_block)
             self.e_block = max(0, self.e_block - dmg)
             self.e_hp -= actual
-            self.p_residue += 1
-            self.log.insert(0, f"造成 {actual} 点伤害（形值 +1）")
+            self.log.insert(0, f"造成 {actual} 点伤害")
 
         if "block" in eff:
             self.p_block += eff["block"]
@@ -310,7 +308,6 @@ class Game:
             self.turn += 1
             self.p_energy = self.p_max_energy
             self.p_block = 0
-            self.p_residue = 0
             self.draw(5)
             self.roll_intent()
             self.phase = "player"
@@ -473,10 +470,6 @@ while running:
         bl = F_SML.render(f"格挡 {game.p_block}", True, ACCENT)
         screen.blit(bl, (142, 356))
 
-    # 形值
-    ry = F_SML.render(f"形值 {game.p_residue}", True, PURPLE)
-    screen.blit(ry, (100, 356))
-
     # ---------- 敌人区 ----------
     e_area = pygame.Rect(950, 130, 260, 250)
     draw_panel(screen, e_area)
@@ -518,14 +511,6 @@ while running:
     if game.combo_hint:
         ch = F_SML.render(game.combo_hint, True, GREEN)
         screen.blit(ch, (75, 500))
-
-    # ---------- 战报 ----------
-    log_rect = pygame.Rect(980, 420, 260, 180)
-    draw_panel(screen, log_rect)
-    lt = F_SML.render("战报", True, TEXT)
-    screen.blit(lt, (996, 430))
-    for i, line in enumerate(game.log[:6]):
-        wrap_text(screen, line, F_TINY, TEXT_MUTE, 996, 456 + i * 24, 232)
 
     # ---------- 结束回合按钮 ----------
     if game.phase == "player":

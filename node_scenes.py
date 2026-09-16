@@ -316,7 +316,7 @@ class RestPanel(Panel):
 # ==================== 商店 ====================
 class ShopPanel(Panel):
     title = "商店"
-    subtitle = "用形值换来的钱，买一点确定性"
+    subtitle = "用金币买一点确定性"
 
     def __init__(self, player):
         super().__init__(player)

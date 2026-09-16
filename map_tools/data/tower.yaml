@@ -61,7 +61,7 @@ node_types:
   - id: battle
     name: 普通战斗
     weight: 45
-    desc: 常规敌人，掉落卡牌与形值
+    desc: 常规敌人，掉落卡牌
     icon: "×"
 
   - id: elite

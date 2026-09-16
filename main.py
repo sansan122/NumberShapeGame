@@ -410,8 +410,7 @@ class Game:
         p = self.player
         has_save = self.has_save()
 
-        # 面板高度按内容算：多一行「有存档」就高一点，
-        # 否则那行字会画到面板外面去（看起来像和「记录」叠住了）
+        # 面板高度按内容算：多一行「有存档」就高一点
         rows = 4 + (1 if has_save else 0)
         box_h = 12 + 24 + 20 + 24 * 3 + 22 * (rows - 4) + 22 + 6
         box = pygame.Rect(20, 76, 210, box_h)
@@ -463,20 +462,6 @@ class Game:
             y += 22
             screen.blit(self.F_TINY.render("有存档　L 读档", True, M.GOLD),
                         (box.x + 14, y))
-
-        # 最近的事件日志（紧贴在状态面板下方）
-        if p.log_lines:
-            ly = box.bottom + 12
-            lb = pygame.Rect(20, ly, 250, 150)
-            pygame.draw.rect(screen, M.PANEL, lb, border_radius=12)
-            pygame.draw.rect(screen, M.PANEL_LINE, lb, 1, border_radius=12)
-            screen.blit(self.F_TINY.render("记录", True, M.TEXT_MUTE),
-                        (lb.x + 12, lb.y + 8))
-            yy = lb.y + 28
-            for line in p.log_lines[:6]:
-                txt = line if len(line) <= 16 else line[:15] + "…"
-                screen.blit(self.F_TINY.render(txt, True, M.TEXT), (lb.x + 12, yy))
-                yy += 19
 
     def draw_hint(self, screen, text):
         """底部提示。

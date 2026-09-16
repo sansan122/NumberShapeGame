@@ -89,7 +89,6 @@ class BattleScene:
         self.p_block = 0
         self.p_energy = 3
         self.p_max_energy = 3
-        self.p_residue = 0
 
         # ---- 敌人侧 ----
         self.e_name = cfg["name"]
@@ -208,8 +207,7 @@ class BattleScene:
             actual = max(0, dmg - self.e_block)
             self.e_block = max(0, self.e_block - dmg)
             self.e_hp -= actual
-            self.p_residue += 1
-            self.log.insert(0, "造成 %d 点伤害（形值 +1）" % actual)
+            self.log.insert(0, "造成 %d 点伤害" % actual)
 
         if "block" in eff:
             gain = eff["block"]
@@ -280,7 +278,6 @@ class BattleScene:
             self.turn += 1
             self.p_energy = self.p_max_energy
             self.p_block = 0
-            self.p_residue = 0
             self._eq_used = False
             n = 5 + (1 if self.player.has_relic("对数尺") else 0)
             self.draw_cards(n)
@@ -437,8 +434,6 @@ class BattleScene:
             pygame.draw.circle(screen, ACCENT, (112, 308), 16)
             bl = self.F_SML.render(str(self.p_block), True, (255, 255, 255))
             screen.blit(bl, bl.get_rect(center=(112, 308)))
-        ry = self.F_SML.render("形值 %d" % self.p_residue, True, PURPLE)
-        screen.blit(ry, (140, 299))
 
         # 能量
         en_lbl = self.F_SML.render("能量", True, TEXT_MUTE)
@@ -474,17 +469,6 @@ class BattleScene:
         icol = {"attack": RED, "block": ACCENT, "buff": PURPLE}[self.e_intent]
         ii = self.F_SML.render("意图：" + intent, True, icol)
         screen.blit(ii, (WIDTH - 300, 334))
-
-        # ---------- 战报 ----------
-        lb = pygame.Rect(70, 420, 320, 250)
-        self.panel(screen, lb)
-        lt = self.F_SML.render("战报", True, TEXT_MUTE)
-        screen.blit(lt, (lb.x + 14, lb.y + 10))
-        ly = lb.y + 38
-        for line in self.log[:9]:
-            txt = line if len(line) <= 22 else line[:21] + "…"
-            screen.blit(self.F_SML.render(txt, True, TEXT), (lb.x + 14, ly))
-            ly += 22
 
         # ---------- 结束回合按钮 ----------
         if self.phase == "player" and not self.done:

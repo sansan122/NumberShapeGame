@@ -475,7 +475,7 @@ class MapScene:
         # ---------- 3. 顶部信息栏 ----------
         self.draw_topbar(screen)
 
-        # ---------- 4. 左侧战报 / 右下提示 ----------
+        # ---------- 4. 左侧状态 / 底部提示 ----------
         self.draw_side(screen)
 
         # ---------- 5. 悬停提示 ----------
@@ -550,17 +550,6 @@ class MapScene:
         if self.hide_next:
             screen.blit(self.F_SML.render("未完待证：下一层未知", True, GOLD),
                         (box.x + 14, y))
-
-        # ---- 右下：战报 ----
-        lb = pygame.Rect(WIDTH - 330, 76, 310, 178)
-        pygame.draw.rect(screen, PANEL, lb, border_radius=12)
-        pygame.draw.rect(screen, PANEL_LINE, lb, 1, border_radius=12)
-        screen.blit(self.F_SML.render("战报", True, TEXT_MUTE), (lb.x + 14, lb.y + 10))
-        ly = lb.y + 34
-        for line in self.log[:7]:
-            txt = line if len(line) <= 19 else line[:18] + "…"
-            screen.blit(self.F_SML.render(txt, True, TEXT), (lb.x + 14, ly))
-            ly += 20
 
         # ---- 底部提示 ----
         tip = "滚轮 / ↑↓ 滚动视角　·　点击高亮节点移动　·　ESC 返回"

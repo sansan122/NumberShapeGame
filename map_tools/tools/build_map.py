@@ -397,7 +397,7 @@ def generate_floor(floor, node_types, cost_pool, rng):
                     tid = "battle"
                 ntype = type_by_id.get(tid) or type_by_id.get("battle") or {
                     "id": "battle", "name": "普通战斗", "icon": "×",
-                    "desc": "常规敌人，掉落卡牌与形值"}
+                    "desc": "常规敌人，掉落卡牌"}
             elif r == rows - 1:
                 # boss 不在 node_types 里，是层主专属，这里兜一个默认
                 ntype = type_by_id.get("boss") or {
@@ -407,7 +407,7 @@ def generate_floor(floor, node_types, cost_pool, rng):
                 tid = type_plan[r][c] if c < len(type_plan[r]) else "battle"
                 ntype = type_by_id.get(tid) or {
                     "id": "battle", "name": "普通战斗", "icon": "×",
-                    "desc": "常规敌人，掉落卡牌与形值"}
+                    "desc": "常规敌人，掉落卡牌"}
 
             nodes.append({
                 "id": node_id,
