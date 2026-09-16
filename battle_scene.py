@@ -50,16 +50,17 @@ CARD_SEL    = (255, 244, 200)
 SHADOW      = (228, 226, 218)
 
 # ---- 战斗背景（渐变 + 装饰，纯代码绘制，无外部贴图）----
-BG_TOP      = (240, 244, 250)   # 背景渐变：顶部偏冷蓝
-BG_BOT      = (248, 244, 238)   # 底部偏暖米
-FLOOR       = (226, 232, 240)   # 地面 / 地平线
-DECO_SYMBOL = (222, 228, 238)   # 漂浮数学符号（淡，不抢字）
-DECO_LINE   = (234, 238, 246)   # 背景网格 / 函数曲线（比符号更淡）
-DECO_GRAPH  = (228, 234, 244)   # 几何图形描边
-DECO_FORMULA= (210, 216, 230)   # 公式文字（最淡可读层）
-GLOW_ALLY   = (200, 224, 248)   # 玩家头像外圈光晕
-GLOW_FOE    = (248, 216, 216)   # 敌人头像外圈光晕
-BATTLE_LINE = (232, 236, 244)   # 中央对决区底衬
+# 深一点的中浅色调，营造「塔内神秘感」；仍是浅底深字，不抢前景可读性
+BG_TOP      = (196, 206, 224)   # 背景渐变：顶部偏冷蓝（原 240,244,250 加深）
+BG_BOT      = (218, 210, 198)   # 底部偏暖米（原 248,244,238 加深）
+FLOOR       = (186, 194, 208)   # 地面 / 地平线（原 226,232,240 加深）
+DECO_SYMBOL = (178, 188, 206)   # 漂浮数学符号（随背景一起加深，仍淡）
+DECO_LINE   = (196, 204, 218)   # 背景网格（比符号更淡，隐隐一层）
+DECO_GRAPH  = (170, 180, 200)   # 几何图形描边（略深，动起来时可见）
+DECO_FORMULA= (160, 170, 192)   # 公式文字（最清晰的一层装饰）
+GLOW_ALLY   = (168, 196, 226)   # 玩家头像外圈光晕
+GLOW_FOE    = (224, 186, 186)   # 敌人头像外圈光晕
+BATTLE_LINE = (188, 194, 208)   # 中央对决区底衬
 
 WIDTH, HEIGHT = 1280, 720
 CARD_W, CARD_H = 132, 176
@@ -437,13 +438,13 @@ class BattleScene:
             b = int(BG_TOP[2] + (BG_BOT[2] - BG_TOP[2]) * t)
             pygame.draw.line(screen, (r, g, b), (0, y), (WIDTH, y))
 
-        # 2) 地面：底部一条浅色地平线，把手牌区「托」起来
+        # 2) 地面：底部一条地平线，把手牌区「托」起来
         pygame.draw.rect(screen, FLOOR, (0, HEIGHT - CARD_H - 52, WIDTH, CARD_H + 52))
-        pygame.draw.line(screen, (210, 217, 228),
+        pygame.draw.line(screen, (170, 180, 200),
                          (0, HEIGHT - CARD_H - 52), (WIDTH, HEIGHT - CARD_H - 52), 2)
 
         # 3) 数学装饰：坐标网格 / 函数曲线 / 几何图形 / 公式（都在前景之下）
-        self.draw_math_decor(screen)
+        self.draw_math_decor(screen, t_ms)
 
         # 4) 漂浮的数学符号（半透明，慢速上下漂移，呼应「数与形」主题）
         symbols = ["∑", "√", "π", "∞", "△", "=", "×", "∫",
@@ -465,11 +466,12 @@ class BattleScene:
             s.set_alpha(90)
             screen.blit(s, s.get_rect(center=(sx, sy + dy)))
 
-    def draw_math_decor(self, screen):
+    def draw_math_decor(self, screen, t_ms):
         """在渐变背景上铺一层数学元素：网格、函数曲线、几何图形、公式。
 
         全部用极淡的颜色，画在玩家/敌人面板之下，只做氛围、不抢前景。
-        坐标都是固定值（不引入随机抖动），保证画面稳定、可测试。
+        函数曲线和几何图形现在会「动」——用 t_ms 驱动相位/旋转/浮动，
+        但都是平滑的周期性运动（不引入随机抖动），画面稳定、可测试。
 
         布局约束（必须避开前景）：
           玩家面板 x70~330 / y130~380；敌人面板 x950~1210 / y130~380；
@@ -484,38 +486,53 @@ class BattleScene:
         for gy in range(gy0, gy1, 60):
             pygame.draw.line(screen, DECO_LINE, (340, gy), (930, gy), 1)
 
-        # ---- 3.2 函数曲线：正弦波 + 抛物线，用折线绘制 ----
-        # 正弦波（中央区左半，起伏平缓，不压到面板）
+        # ---- 3.2 函数曲线：正弦波（横向流动）+ 抛物线（上下呼吸）----
+        # 正弦波：相位随时间推进，整条波像在「传播」一样左右流动
+        phase = t_ms / 500.0
         pts = []
         for x in range(360, 560):
-            y = 150 + int(22 * math.sin((x - 360) / 32.0))
+            y = 150 + int(24 * math.sin((x - 360) / 28.0 - phase))
             pts.append((x, y))
         if len(pts) > 1:
             pygame.draw.lines(screen, DECO_GRAPH, False, pts, 2)
 
-        # 抛物线（中央区右半，开口朝上）
+        # 抛物线：顶点随 t_ms 上下呼吸（开口幅度缓慢变化）
+        breathe = 0.5 + 0.5 * math.sin(t_ms / 900.0)   # 0~1 起伏
         pts = []
         for x in range(720, 920):
             t = (x - 820) / 100.0
-            y = 180 + int(90 * t * t)
+            y = 180 + int(100 * breathe * t * t)
             pts.append((x, y))
         if len(pts) > 1:
             pygame.draw.lines(screen, DECO_GRAPH, False, pts, 2)
 
-        # ---- 3.3 几何图形（描边，呼应「形」）----
-        # 圆（顶部横带，靠左）
-        pygame.draw.circle(screen, DECO_GRAPH, (430, 90), 26, 2)
-        # 正方形（中央区下段）
-        sq = pygame.Rect(500, 320, 38, 38)
-        pygame.draw.rect(screen, DECO_GRAPH, sq, 2)
-        # 三角形（中央区右段）
+        # ---- 3.3 几何图形（描边，随 t_ms 旋转 / 浮动，呼应「形」）----
+        # 圆（顶部横带靠左）：半径随 t_ms 缓慢「呼吸」，像有生命
+        cr = 26 + int(6 * math.sin(t_ms / 700.0))
+        pygame.draw.circle(screen, DECO_GRAPH, (430, 90), cr, 2)
+        # 正方形（中央区下段）：绕中心缓慢旋转
+        sq_cx, sq_cy, sq_half = 519, 339, 20
+        sq_ang = t_ms / 3000.0
+        sq_pts = []
+        for k in range(4):
+            a = sq_ang + math.pi / 4 + k * math.pi / 2
+            sq_pts.append((sq_cx + sq_half * 1.414 * math.cos(a),
+                           sq_cy + sq_half * 1.414 * math.sin(a)))
+        pygame.draw.polygon(screen, DECO_GRAPH, sq_pts, 2)
+        # 三角形（中央区右段）：上下浮动
+        tri_dy = int(8 * math.sin(t_ms / 650.0 + 1.0))
         pygame.draw.polygon(screen, DECO_GRAPH,
-                            [(880, 330), (920, 330), (900, 298)], 2)
-        # 同心圆（中央区左段）
+                            [(880, 330 + tri_dy), (920, 330 + tri_dy),
+                             (900, 298 + tri_dy)], 2)
+        # 同心圆（中央区左段）+ 卫星点绕外圈转，暗示旋转
         pygame.draw.circle(screen, DECO_GRAPH, (380, 300), 28, 2)
         pygame.draw.circle(screen, DECO_GRAPH, (380, 300), 16, 1)
+        sat_ang = t_ms / 700.0
+        sat_x = 380 + int(28 * math.cos(sat_ang))
+        sat_y = 300 + int(28 * math.sin(sat_ang))
+        pygame.draw.circle(screen, DECO_GRAPH, (sat_x, sat_y), 3)
 
-        # ---- 3.4 公式（小字，最淡可读层）----
+        # ---- 3.4 公式（小字，最淡可读层，保持静态不抢戏）----
         formulas = [
             "E = mc²", "a² + b² = c²", "πr²", "y = f(x)",
             "√2", "lim", "Σ", "d/dx",
@@ -527,7 +544,7 @@ class BattleScene:
         f = E.load_font(22)
         for txt, (fx, fy) in zip(formulas, fpos):
             s = f.render(txt, True, DECO_FORMULA)
-            s.set_alpha(110)
+            s.set_alpha(120)
             screen.blit(s, s.get_rect(center=(fx, fy)))
 
     def draw_battle_stage(self, screen, t_ms):
@@ -543,8 +560,8 @@ class BattleScene:
         my = 300
         pulse = 3 + int(2 * (1 + math.sin(t_ms / 500.0)))
         pygame.draw.circle(screen, BATTLE_LINE, (cx, my), 26)
-        pygame.draw.circle(screen, (208, 214, 226), (cx, my), 14 + pulse, 2)
-        pygame.draw.circle(screen, (180, 190, 208), (cx, my), 4)
+        pygame.draw.circle(screen, (176, 186, 204), (cx, my), 14 + pulse, 2)
+        pygame.draw.circle(screen, (150, 162, 184), (cx, my), 4)
 
     # ==================== 舞台（杀戮尖塔式布局） ====================
     def draw_stage(self, screen):
