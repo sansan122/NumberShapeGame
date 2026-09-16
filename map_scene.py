@@ -299,11 +299,21 @@ class MapScene:
     # ==================== 相机 ====================
     def camera_for(self, node, anchor=0.62):
         """
-        让节点落在屏幕 anchor 比例处时，相机应在哪。
+        让节点落在屏幕某个高度时，相机应在哪。
 
-        anchor 越大 -> 节点越靠屏幕下方 -> 上方能看到更多「前路」。
-        太小会把可达节点顶出屏幕；太大下半屏会空。
-        0.62 是试出来的平衡点：当前位置在下部，上面能看到 2~3 行。
+        先把这条式子推对（原来的注释写反了，别再照着它改符号）：
+
+            画面 y = HEIGHT/2 + (wy - cam_y)
+            代入 cam_y = wy + (anchor - 0.5) * HEIGHT
+            => 画面 y = HEIGHT * (1 - anchor)
+
+        所以 anchor=0.62 时，当前节点落在 y ≈ 274，也就是屏幕**上**三分之一处，
+        它上方自然留出 274px 给「前路」，正好能看到 2~3 行。
+        换句话说 anchor 越大 -> 节点越靠上 -> 上方空间越少（不是越多）。
+
+        为什么不让节点靠下？因为在起点时「身后」没有行可显示，
+        节点放得越低、下半屏越空。现在这个位置是四行以内构图的最优解：
+        顶端看得到 4 行，起点看得到 2~3 行（见 clamp_camera 的实测数字）。
         """
         return node["wy"] + (anchor - 0.5) * HEIGHT
 
@@ -334,13 +344,20 @@ class MapScene:
         self.scroll(amount)
 
     def clamp_camera(self):
-        """限制相机范围，别滚出地图。"""
+        """限制相机范围，别滚出地图。
+
+        上下界直接复用 camera_for —— 那是「走到某一行时镜头会停的位置」。
+        钳在这里，等于说：无论玩家怎么滚，镜头落点都和正常行走时的构图一致，
+        不会出现「滚到顶却只看到一行、大半个屏幕是空的」这种死角。
+
+        （旧写法是 top - HEIGHT*0.5 / bot + HEIGHT*0.30，符号推反了：
+          实测滚到顶时 12 行里只剩 1 行在屏内，而且那行还贴在屏幕最下边。
+          改成 camera_for 之后，两端各能看到 3~4 行。）
+        """
         if not self.row_nodes or not self.row_nodes[-1]:
             return
-        top = self.row_nodes[-1][0]["wy"]      # 最上面一行的 y（最小）
-        bot = self.row_nodes[0][0]["wy"]       # 最下面一行的 y（最大）
-        lo = top - HEIGHT * 0.5                # 能看到顶层
-        hi = bot + HEIGHT * 0.30               # 能看到底层
+        lo = self.camera_for(self.row_nodes[-1][0])   # 顶层构图（wy 最小）
+        hi = self.camera_for(self.row_nodes[0][0])    # 底层构图（wy 最大）
         self.cam_target = max(lo, min(hi, self.cam_target))
         self.cam_y = max(lo, min(hi, self.cam_y))
 
