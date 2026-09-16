@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """char_art.py —— 角色立绘与动作动画的加载 / 播放。
 
-素材来源：人物/ 目录（角色001=演算者、角色002=构形师），
-经 tmp/prepare_char_art.py 预处理成 assets/chars/{id}/ 下的 PNG 帧序列：
+素材来源：人物(1)/ 目录（角色001=演算者、角色002=构形师、
+角色003=解方程者），经 tmp/prepare_char_art.py 预处理成
+assets/chars/{id}/ 下的 PNG 帧序列：
 
     full.png        静态立绘（选角卡片等不动的场合）
     idle_NN.png     待机循环（8 帧 × 100ms）
@@ -11,8 +12,8 @@
 
 三条硬规矩（都吃过亏）：
 
-  1. **素材缺失绝不崩** —— 三个角色只有两个有图，而且打包时
-     assets 目录也可能漏带。加载失败时 `has_art=False`，
+  1. **素材缺失绝不崩** —— 角色图是后来一张一张补的（现在三个都齐，
+     但打包时 assets 目录仍可能漏带）。加载失败时 `has_art=False`，
      调用方退回原来的「符号 + 颜色」占位画法。
   2. **资源路径一律走 game_env.resource_path** —— 打包后资源
      在 sys._MEIPASS 临时目录，`Path(__file__).parent` 会找错地方。
@@ -41,6 +42,7 @@ _ACTIONS = (("idle", True), ("attack", False), ("hit", False))
 _DIRS = {
     "calculator": "calculator",
     "geometer": "geometer",
+    "solver": "solver",
 }
 
 # ---------------------------------------------------------------------------

@@ -20,5 +20,6 @@ release/
 *.old
 
 # 美术源文件（Aseprite 工程和原始 GIF，由作者自己保管；
-# 仓库只收 assets/ 下的派生帧图，可用 tmp/prepare_char_art.py 重新生成）
-人物/
+# 仓库只收 assets/ 下的派生帧图，可用 tmp/prepare_char_art.py 重新生成。
+# 目录名后来被解压成了「人物(1)」等变体，用通配一起忽略）
+人物*/
