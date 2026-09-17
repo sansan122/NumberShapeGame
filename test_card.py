@@ -18,6 +18,8 @@ import sys
 
 import pygame
 
+import art_shapes
+
 # ==================== 基础设置 ====================
 pygame.init()
 WIDTH, HEIGHT = 1280, 720
@@ -109,13 +111,10 @@ class Card:
         nm = F_SML.render(self.name, True, TEXT)
         surf.blit(nm, nm.get_rect(center=(self.rect.centerx, self.rect.y + 74)))
 
-        # 大数值（数字卡显示数字，图形卡显示符号）
-        if self.ctype == "number":
-            big = F_BIG.render(str(self.value), True, ACCENT)
-            surf.blit(big, big.get_rect(center=(self.rect.centerx, self.rect.y + 112)))
-        else:
-            big = F_BIG.render("△", True, GREEN)
-            surf.blit(big, big.get_rect(center=(self.rect.centerx, self.rect.y + 112)))
+        # 图案（按卡名的几何图案，和正式版共用 art_shapes 那一套）
+        art_shapes.draw_card_icon(surf, self.name,
+                                  (self.rect.centerx, self.rect.y + 108),
+                                  self.rect.w * 0.35, edge)
 
         # 描述（自动换行）
         wrap_text(surf, self.desc, F_TINY, TEXT_MUTE,

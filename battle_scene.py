@@ -27,6 +27,7 @@ import pygame
 
 import game_env as E
 import char_art
+import art_shapes
 from player import Card
 
 # ==================== 配色 ====================
@@ -159,9 +160,12 @@ class BattleScene:
         self.P_X, self.P_FOOT = 250, 486      # 玩家：站位 / 脚底
         self.P_SYM_CY = 360                   # 无立绘时占位圆的圆心
         self.E_X = 1000                       # 敌人站位
-        # 敌人体型随档次变大（底边统一落在 y=435 的「地面」上）
+        # 敌人体型随档次变大。E_CY 让形象**底边正好踩在 y=486 的地面线上**
+        # （和玩家脚底 P_FOOT 同一条线，脚下影子都是 492）。
+        # 注意这里曾是 435 - E_R —— 那会让敌人整体浮在地面线上方 57px，
+        # 看着像挂在半空（换成几何形象后特别明显）。别改回 435。
         self.E_R = {"battle": 78, "elite": 88, "boss": 100}.get(self.kind, 84)
-        self.E_CY = 435 - self.E_R
+        self.E_CY = 486 - self.E_R
 
         self.layout_hand()  # 先算一次手牌位置，保证第一帧点得到
 
@@ -564,7 +568,7 @@ class BattleScene:
         pygame.draw.circle(screen, (150, 162, 184), (cx, my), 4)
 
     # ==================== 舞台（杀戮尖塔式布局） ====================
-    def draw_stage(self, screen):
+    def draw_stage(self, screen, t_ms):
         """对峙舞台：玩家大立绘在左、敌人在右，都「站」在地面上，
         血条和格挡画在角色脚边，意图悬在敌人头顶。
 
@@ -607,13 +611,11 @@ class BattleScene:
         screen.blit(it, it.get_rect(center=ibox.center))
 
         self._ground_shadow(screen, (self.E_X, 492), 190)
-        pygame.draw.circle(screen, GLOW_FOE, (self.E_X, self.E_CY), self.E_R + 10)
-        pygame.draw.circle(screen, RED, (self.E_X, self.E_CY), self.E_R)
-        pygame.draw.circle(screen, (255, 255, 255),
-                           (self.E_X, self.E_CY), self.E_R, 2)
-        # 圆里只放名字前两个字（完整名字写在血条右侧，不占手牌区）
-        en = self.F_BIG.render(self.e_name[:2], True, (255, 255, 255))
-        screen.blit(en, en.get_rect(center=(self.E_X, self.E_CY)))
+        # 敌人形象：三档各有各的几何母题（几何魔像 / 方程组·三元 / 不可解之影），
+        # 不再用「红圆 + 名字前两字」占位。体型半径沿用原来的 E_R，
+        # 底边正好落在 y=435 的地面线上，意图框/血条/影子的位置都不用动。
+        art_shapes.draw_enemy(screen, self.kind, (self.E_X, self.E_CY),
+                              self.E_R, t_ms)
 
         self.hp_bar(screen, self.E_X, 494, self.e_hp, self.e_max_hp)
         self._block_badge(screen, (self.E_X - 122, 505), self.e_block)
@@ -685,7 +687,7 @@ class BattleScene:
         screen.blit(gt, (gx + 14, 18))
 
         # ---------- 舞台：角色立于场地左右（杀戮尖塔式布局） ----------
-        self.draw_stage(screen)
+        self.draw_stage(screen, t_ms)
 
         # ---------- 左下角：能量球 ----------
         self.draw_energy(screen)
@@ -748,13 +750,20 @@ class BattleScene:
         nm = self.F_SML.render(card.name, True, TEXT)
         screen.blit(nm, nm.get_rect(center=(r.centerx + 8, r.y + 17)))
 
+        # 图案区：卡面中部的几何图案（形状按卡名，颜色随卡类型）。
+        # 以前这块是空的，只有文字，卡面显得很干；图案居中放在
+        # 彩条和类型标签之间，占卡面最大的视觉比重。
+        icon_cy = r.y + 71
+        art_shapes.draw_card_icon(screen, card.name,
+                                  (r.centerx, icon_cy), r.w * 0.46, col)
+
         # 类型标签
         tag = "数字" if card.ctype == "number" else "图形"
         tg = self.F_TINY.render(tag, True, col)
-        screen.blit(tg, tg.get_rect(center=(r.centerx, r.y + 52)))
+        screen.blit(tg, tg.get_rect(center=(r.centerx, r.y + 108)))
 
         # 描述
-        cy = r.y + 78
+        cy = r.y + 122
         line = ""
         for ch in card.desc:
             if self.F_TINY.size(line + ch)[0] > r.w - 20:

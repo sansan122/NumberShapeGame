@@ -25,6 +25,7 @@
 import pygame
 
 import game_env as E
+import art_shapes
 
 # ==================== 配色（和 battle_scene 保持一致）====================
 PANEL       = (255, 255, 255)
@@ -340,14 +341,15 @@ class DeckView:
         nt = self.F_TINY.render(nm, True, TEXT)
         screen.blit(nt, nt.get_rect(midtop=(r.centerx + 8, r.y + 22)))
 
-        # 分割线
-        pygame.draw.line(screen, PANEL_LINE,
-                         (r.x + 10, r.y + 46), (r.right - 10, r.y + 46))
+        # 图案区：卡面中部的几何图案（和战斗大卡同一套，只是缩放更小）。
+        # 原来这里是一条分割线，改成图案后它自己就起到分隔作用了。
+        art_shapes.draw_card_icon(screen, card.name,
+                                  (r.centerx, r.y + 63), r.w * 0.40, col)
 
         # 说明文字（折行，放不下就省略）
         lines = wrap_text(self.F_TINY, card.desc or "", r.w - 18)
-        ly = r.y + 54
-        for ln in lines[:6]:
+        ly = r.y + 88
+        for ln in lines[:3]:
             screen.blit(self.F_TINY.render(ln, True, TEXT_MUTE), (r.x + 9, ly))
             ly += 16
 

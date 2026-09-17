@@ -79,6 +79,7 @@ a = Analysis(
         "ui_scenes",
         "game_env",
         "char_art",
+        "art_shapes",
         "yaml",
     ],
     hookspath=[],
