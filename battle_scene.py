@@ -59,6 +59,68 @@ DECO_SYMBOL = (178, 188, 206)   # 漂浮数学符号（随背景一起加深，�
 DECO_LINE   = (196, 204, 218)   # 背景网格（比符号更淡，隐隐一层）
 DECO_GRAPH  = (170, 180, 200)   # 几何图形描边（略深，动起来时可见）
 DECO_FORMULA= (160, 170, 192)   # 公式文字（最清晰的一层装饰）
+# ---- 坐标系（背景里的函数要「画在坐标轴上」）----
+AXIS_COL    = (172, 182, 204)   # 坐标轴 / 刻度 / x·y·O 标注
+PLANE_GRID  = (205, 212, 226)   # 坐标系内部的单位网格（最淡的一层）
+CURVE_COL   = (145, 157, 187)   # 函数曲线（坐标系里最醒目的元素，仍淡于前景）
+DECO_LABEL  = (158, 169, 194)   # 坐标系角落的函数名
+
+#: 背景里的两个坐标系：左 = y=sin x（曲线横向流动），右 = y=x²（开口呼吸）
+#  矩形是「图纸」范围，曲线超出部分会被裁掉，所以不会有线头飞到坐标系外面。
+#  左右边界是量出来的，不是拍的：
+#    左 ≥ 448 —— 三个角色所有动作帧的立绘像素最右到 x=444（实测 union），
+#                再往左摆就会被角色压住；
+#    右 ≤ 886 —— Boss 体型半径 100、E_X=1000，最左到 x=900；
+#    中间让开 x=640 的「对决区」中线（占 639~641）。
+SIN_PLANE  = pygame.Rect(450, 126, 186, 148)
+SIN_ORIGIN = (480, 200)         # 正弦的原点（轴的中点，波绕着它上下摆）
+SIN_UNIT   = 19                 # 正弦：1 个数学单位 19px，横向约 1.55 个周期
+PAR_PLANE  = pygame.Rect(662, 126, 224, 148)
+PAR_ORIGIN = (774, 250)         # 抛物线的原点放在底部中央，开口朝上
+PAR_UNIT   = 21                 # 抛物线：1 个单位 21px，呼吸到最陡也留在框内
+
+#: 漂浮符号：(字符, 屏幕x, 屏幕y)。刻意避开两个坐标系占的中间带
+#  （x450~886 / y126~274），所以全挤在「顶栏之下、图纸之上」那条 74px 窄带、
+#  左右边缘、以及图纸下方的空档里。字号 52 正好塞进那条窄带。
+DECO_SYMBOLS = [
+    ("∑", 110, 84), ("π", 250, 84), ("√", 330, 92), ("∞", 960, 90),
+    ("∫", 1150, 84), ("θ", 1230, 118),
+    ("△", 62, 300), ("α", 170, 440),
+    ("λ", 368, 444), ("φ", 596, 322),
+]
+DECO_SYMBOL_SIZE = 52
+
+
+def deco_symbol_offset(i, t_ms):
+    """第 i 个漂浮符号在 t_ms 时的纵向漂移量（像素）。
+
+    每个符号相位不同、幅度 6~12px 不等，看着才像各自漂浮。
+    提成模块函数是为了让测试脚本能用同一份公式复算符号的活动范围，
+    免得「代码改了公式、测试还在按旧范围检查」。
+    """
+    return int((6 + (i % 3) * 3) * math.sin(t_ms / 1400.0 + i * 0.7))
+
+
+#: 符号漂移的最大幅度（上界，测试用来框出活动范围）
+DECO_SYMBOL_MAX_DRIFT = 12
+
+#: 公式小字：(文本, 屏幕x, 屏幕y)，同样避开图纸
+DECO_FORMULAS = [
+    ("E = mc²", 398, 62), ("a² + b² = c²", 838, 62),
+    ("πr²", 566, 100), ("√2", 700, 90),
+    ("y = f(x)", 600, 398), ("d/dx", 468, 448),
+    ("Σ", 830, 428), ("lim", 700, 458),
+]
+DECO_FORMULA_SIZE = 22
+
+#: 几何「形」装饰：(锚点x, 锚点y, 半宽, 半高)。半宽/半高取运动到极值时的外接框，
+#  用来保证它们不会转着转着扫进坐标系里。
+DECO_SHAPES = {
+    "circle":   (478, 90, 31, 31),     # 半径呼吸的圆
+    "rings":    (398, 358, 30, 30),    # 同心圆 + 绕圈卫星点
+    "square":   (528, 350, 28, 28),    # 自转的正方形（转 45° 时外接半径最大）
+    "triangle": (884, 348, 22, 34),    # 上下浮动的三角形
+}
 GLOW_ALLY   = (168, 196, 226)   # 玩家头像外圈光晕
 GLOW_FOE    = (224, 186, 186)   # 敌人头像外圈光晕
 BATTLE_LINE = (188, 194, 208)   # 中央对决区底衬
@@ -451,102 +513,181 @@ class BattleScene:
         self.draw_math_decor(screen, t_ms)
 
         # 4) 漂浮的数学符号（半透明，慢速上下漂移，呼应「数与形」主题）
-        symbols = ["∑", "√", "π", "∞", "△", "=", "×", "∫",
-                   "α", "β", "θ", "λ", "φ", "∈", "→", "≈"]
-        spots = [
-            (150, 120), (420, 90), (700, 130), (980, 100),
-            (300, 210), (620, 200), (900, 210), (1180, 170),
-            (80, 320), (1150, 340), (540, 70), (1080, 60),
-            (240, 90), (860, 330), (60, 200), (1220, 250),
-        ]
-        big = E.load_font(64)
-        for i, (sym, (sx, sy)) in enumerate(zip(symbols, spots)):
-            # 用 t_ms 做正弦漂移，每个符号相位/幅度不同，看起来是「漂浮」而非固定
-            phase = i * 0.7
-            amp = 6 + (i % 3) * 3
-            dy = int(amp * math.sin(t_ms / 1400.0 + phase))
+        big = E.load_font(DECO_SYMBOL_SIZE)
+        for i, (sym, sx, sy) in enumerate(DECO_SYMBOLS):
+            dy = deco_symbol_offset(i, t_ms)
             # 半透明：画到一张带 alpha 的临时表面再 blit
             s = big.render(sym, True, DECO_SYMBOL)
             s.set_alpha(90)
             screen.blit(s, s.get_rect(center=(sx, sy + dy)))
 
-    def draw_math_decor(self, screen, t_ms):
-        """在渐变背景上铺一层数学元素：网格、函数曲线、几何图形、公式。
+    def _coord_plane(self, screen, box, origin, unit, t_ms, kind):
+        """画一个「带坐标轴」的函数图，并让曲线在轴内运动。
 
-        全部用极淡的颜色，画在玩家/敌人面板之下，只做氛围、不抢前景。
-        函数曲线和几何图形现在会「动」——用 t_ms 驱动相位/旋转/浮动，
-        但都是平滑的周期性运动（不引入随机抖动），画面稳定、可测试。
+        参数：
+          box    坐标系占的矩形（图纸范围）。整个绘制都套在这一层裁剪里，
+                 所以曲线跑到框外会被切掉，不会有一条线头飞出去。
+          origin 原点在屏幕上的位置。
+          unit   1 个数学单位 = 多少像素。
+          kind   "sin"  —— y = 1.55·sin(x − phase)，相位随时间推进，
+                          整条波像水波一样横向流动；另有一颗「珠子」固定在
+                          x = 6.2 处，随波上下起伏。
+                 "parabola" —— y = a·x²，顶点钉在原点，开口随 a 呼吸；
+                          一颗「珠子」沿曲线左右滑动，像有参数在扫描。
 
-        布局约束（必须避开前景）：
-          玩家面板 x70~330 / y130~380；敌人面板 x950~1210 / y130~380；
-          顶部标题栏 y0~52；中央竖线 cx=640。
-        可见区 = 顶部横带 y60~125 + 中央区 x340~940（y60~470）。
+        绘制顺序：单位网格 → 坐标轴 + 箭头 + 刻度 → 曲线 → 动点 → 文字标注。
         """
-        # ---- 3.1 坐标网格：淡色横竖细线，像坐标纸 ----
-        # 只在中央可见区铺网格，避开左右面板
-        gy0, gy1 = 70, 470
-        for gx in range(360, 940, 90):
-            pygame.draw.line(screen, DECO_LINE, (gx, gy0), (gx, gy1), 1)
-        for gy in range(gy0, gy1, 60):
-            pygame.draw.line(screen, DECO_LINE, (340, gy), (930, gy), 1)
+        ox, oy = origin
+        old_clip = screen.get_clip()
+        screen.set_clip(box)
 
-        # ---- 3.2 函数曲线：正弦波（横向流动）+ 抛物线（上下呼吸）----
-        # 正弦波：相位随时间推进，整条波像在「传播」一样左右流动
-        phase = t_ms / 500.0
+        # ---- 1) 单位网格：最淡的一层，像坐标纸 ----
+        gx = ox + unit
+        while gx <= box.right:
+            pygame.draw.line(screen, PLANE_GRID, (gx, box.top), (gx, box.bottom), 1)
+            gx += unit
+        gx = ox - unit
+        while gx >= box.left:
+            pygame.draw.line(screen, PLANE_GRID, (gx, box.top), (gx, box.bottom), 1)
+            gx -= unit
+        gy = oy - unit
+        while gy >= box.top:
+            pygame.draw.line(screen, PLANE_GRID, (box.left, gy), (box.right, gy), 1)
+            gy -= unit
+        gy = oy + unit
+        while gy <= box.bottom:
+            pygame.draw.line(screen, PLANE_GRID, (box.left, gy), (box.right, gy), 1)
+            gy += unit
+
+        # ---- 2) 坐标轴：横轴 x、纵轴 y，末端带箭头 ----
+        pygame.draw.line(screen, AXIS_COL, (box.left, oy), (box.right, oy), 2)
+        pygame.draw.line(screen, AXIS_COL, (ox, box.bottom), (ox, box.top), 2)
+        pygame.draw.polygon(screen, AXIS_COL, [
+            (box.right, oy), (box.right - 11, oy - 5), (box.right - 11, oy + 5)])
+        pygame.draw.polygon(screen, AXIS_COL, [
+            (ox, box.top), (ox - 5, box.top + 11), (ox + 5, box.top + 11)])
+
+        # ---- 3) 刻度：每 1 个单位一个小短划 ----
+        gx = ox + unit
+        while gx <= box.right - 16:
+            pygame.draw.line(screen, AXIS_COL, (gx, oy - 4), (gx, oy + 4), 2)
+            gx += unit
+        gx = ox - unit
+        while gx >= box.left + 4:
+            pygame.draw.line(screen, AXIS_COL, (gx, oy - 4), (gx, oy + 4), 2)
+            gx -= unit
+        gy = oy - unit
+        while gy >= box.top + 16:
+            pygame.draw.line(screen, AXIS_COL, (ox - 4, gy), (ox + 4, gy), 2)
+            gy -= unit
+        gy = oy + unit
+        while gy <= box.bottom - 4:
+            pygame.draw.line(screen, AXIS_COL, (ox - 4, gy), (ox + 4, gy), 2)
+            gy += unit
+
+        # ---- 4) 函数曲线（fy 返回「数学单位」的高度，画前换算成像素）----
+        if kind == "sin":
+            phase = t_ms / 620.0
+
+            def fy(xm):
+                return 1.8 * math.sin(xm - phase)
+        else:
+            # 开口系数 a 随呼吸在 0.075~0.175 之间起伏：a 小则口大开得缓、
+            # a 大则口窄立得陡，看上去就是这条抛物线在「一呼一吸」。
+            # 上限压在 0.175，是为了呼吸到最陡时两臂也刚好留在图纸范围内，
+            # 不会从框顶穿出去。
+            a = 0.125 + 0.05 * math.sin(t_ms / 900.0)
+
+            def fy(xm):
+                return a * xm * xm
+
         pts = []
-        for x in range(360, 560):
-            y = 150 + int(24 * math.sin((x - 360) / 28.0 - phase))
-            pts.append((x, y))
+        x = box.left
+        while x <= box.right:
+            pts.append((x, int(round(oy - fy((x - ox) / float(unit)) * unit))))
+            x += 2
         if len(pts) > 1:
-            pygame.draw.lines(screen, DECO_GRAPH, False, pts, 2)
+            pygame.draw.lines(screen, CURVE_COL, False, pts, 2)
 
-        # 抛物线：顶点随 t_ms 上下呼吸（开口幅度缓慢变化）
-        breathe = 0.5 + 0.5 * math.sin(t_ms / 900.0)   # 0~1 起伏
-        pts = []
-        for x in range(720, 920):
-            t = (x - 820) / 100.0
-            y = 180 + int(100 * breathe * t * t)
-            pts.append((x, y))
-        if len(pts) > 1:
-            pygame.draw.lines(screen, DECO_GRAPH, False, pts, 2)
+        # ---- 5) 曲线上的动点：让「在动」这件事一眼可见 ----
+        if kind == "sin":
+            dm = 6.2                       # 固定在某个 x 上的珠子，随波起伏
+        else:
+            dm = 2.9 * math.sin(t_ms / 1300.0)   # 沿曲线左右扫描
+        pygame.draw.circle(screen, CURVE_COL,
+                           (int(ox + dm * unit),
+                            int(oy - fy(dm) * unit)), 3)
 
-        # ---- 3.3 几何图形（描边，随 t_ms 旋转 / 浮动，呼应「形」）----
-        # 圆（顶部横带靠左）：半径随 t_ms 缓慢「呼吸」，像有生命
-        cr = 26 + int(6 * math.sin(t_ms / 700.0))
-        pygame.draw.circle(screen, DECO_GRAPH, (430, 90), cr, 2)
-        # 正方形（中央区下段）：绕中心缓慢旋转
-        sq_cx, sq_cy, sq_half = 519, 339, 20
+        # ---- 6) 标注：轴名 x / y、原点 O、角落的函数名 ----
+        for txt, pos in (("x", (box.right - 16, oy - 13)),
+                         ("y", (ox + 9, box.top + 8)),
+                         ("O", (ox - 11, oy + 12))):
+            s = self.F_TINY.render(txt, True, AXIS_COL)
+            screen.blit(s, s.get_rect(center=pos))
+
+        screen.set_clip(old_clip)
+
+        # 函数名写在图的下方（像课本里的图注）。放在框内会压在网格线/刻度上，
+        # 放到框外反而干净，也不受裁剪影响。
+        lab = self.F_TINY.render("y = sin x" if kind == "sin" else "y = x²",
+                                 True, DECO_LABEL)
+        screen.blit(lab, (box.left + 2, box.bottom + 2))
+
+    def draw_math_decor(self, screen, t_ms):
+        """在渐变背景上铺一层数学元素：背景里的两个坐标系（各带一条函数
+        曲线）、几何图形、公式。
+
+        全部用极淡的颜色，画在角色之下，只做氛围、不抢前景。
+        函数不再是「悬空漂着的裸曲线」，而是画在各自带刻度的坐标系里：
+        左图的 y = sin x 横向流动、右图的 y = x² 开口呼吸，各自还有一颗
+        动点在曲线上跑。运动都由 t_ms 驱动的平滑周期函数决定（不引入随机
+        抖动），所以画面稳定、截图可复现、也好写断言。
+
+        布局约束（必须避开前景，边界都是实测出来的）：
+          玩家立绘所有动作帧的像素并集 = x56~444 / y206~486（P_X=250、高 280）；
+          敌人最宽是 Boss 半径 100、E_X=1000 → 最左 x900；
+          顶栏 y0~52；手牌从 y518 起；「对决区」中线在 x=640。
+          于是中间那条能摆图纸的空档只有 x448~886，两个坐标系就卡在这里。
+        """
+        # ---- 3.1 两个坐标系（函数画在坐标轴上）----
+        self._coord_plane(screen, SIN_PLANE, SIN_ORIGIN, SIN_UNIT, t_ms, "sin")
+        self._coord_plane(screen, PAR_PLANE, PAR_ORIGIN, PAR_UNIT, t_ms, "parabola")
+
+        # ---- 3.2 几何图形（描边，随 t_ms 旋转 / 浮动，呼应「形」）----
+        # 锚点统一取自 DECO_SHAPES，测试脚本按同一份数据检查「不撞图纸」
+        c_cx, c_cy = DECO_SHAPES["circle"][:2]
+        g_cx, g_cy = DECO_SHAPES["rings"][:2]
+        s_cx, s_cy = DECO_SHAPES["square"][:2]
+        t_cx, t_cy = DECO_SHAPES["triangle"][:2]
+
+        # 圆（顶部横带）：半径随 t_ms 缓慢「呼吸」，像有生命
+        cr = 25 + int(6 * math.sin(t_ms / 700.0))
+        pygame.draw.circle(screen, DECO_GRAPH, (c_cx, c_cy), cr, 2)
+        # 同心圆（下段左）：围一圈卫星点绕外圈转，暗示旋转
+        pygame.draw.circle(screen, DECO_GRAPH, (g_cx, g_cy), 26, 2)
+        pygame.draw.circle(screen, DECO_GRAPH, (g_cx, g_cy), 15, 1)
+        sat_ang = t_ms / 700.0
+        pygame.draw.circle(screen, DECO_GRAPH,
+                           (g_cx + int(26 * math.cos(sat_ang)),
+                            g_cy + int(26 * math.sin(sat_ang))), 3)
+        # 正方形（下段中）：绕中心缓慢旋转
+        sq_half = 19
         sq_ang = t_ms / 3000.0
         sq_pts = []
         for k in range(4):
             a = sq_ang + math.pi / 4 + k * math.pi / 2
-            sq_pts.append((sq_cx + sq_half * 1.414 * math.cos(a),
-                           sq_cy + sq_half * 1.414 * math.sin(a)))
+            sq_pts.append((s_cx + sq_half * 1.414 * math.cos(a),
+                           s_cy + sq_half * 1.414 * math.sin(a)))
         pygame.draw.polygon(screen, DECO_GRAPH, sq_pts, 2)
-        # 三角形（中央区右段）：上下浮动
+        # 三角形（下段右）：上下浮动
         tri_dy = int(8 * math.sin(t_ms / 650.0 + 1.0))
         pygame.draw.polygon(screen, DECO_GRAPH,
-                            [(880, 330 + tri_dy), (920, 330 + tri_dy),
-                             (900, 298 + tri_dy)], 2)
-        # 同心圆（中央区左段）+ 卫星点绕外圈转，暗示旋转
-        pygame.draw.circle(screen, DECO_GRAPH, (380, 300), 28, 2)
-        pygame.draw.circle(screen, DECO_GRAPH, (380, 300), 16, 1)
-        sat_ang = t_ms / 700.0
-        sat_x = 380 + int(28 * math.cos(sat_ang))
-        sat_y = 300 + int(28 * math.sin(sat_ang))
-        pygame.draw.circle(screen, DECO_GRAPH, (sat_x, sat_y), 3)
+                            [(t_cx - 20, t_cy + tri_dy), (t_cx + 20, t_cy + tri_dy),
+                             (t_cx, t_cy - 32 + tri_dy)], 2)
 
-        # ---- 3.4 公式（小字，最淡可读层，保持静态不抢戏）----
-        formulas = [
-            "E = mc²", "a² + b² = c²", "πr²", "y = f(x)",
-            "√2", "lim", "Σ", "d/dx",
-        ]
-        fpos = [
-            (420, 62), (830, 62), (660, 96), (560, 210),
-            (720, 380), (480, 430), (820, 430), (380, 200),
-        ]
-        f = E.load_font(22)
-        for txt, (fx, fy) in zip(formulas, fpos):
+        # ---- 3.3 公式（小字，最淡可读层，保持静态不抢戏）----
+        f = E.load_font(DECO_FORMULA_SIZE)
+        for txt, fx, fy in DECO_FORMULAS:
             s = f.render(txt, True, DECO_FORMULA)
             s.set_alpha(120)
             screen.blit(s, s.get_rect(center=(fx, fy)))
