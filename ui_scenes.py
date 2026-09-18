@@ -21,6 +21,7 @@ import char_art
 import game_env as E
 import player as P
 import save_system
+import sfx
 
 # ==================== 配色（浅色主题，与地图/战斗界面统一）====================
 BG         = (246, 245, 240)
@@ -261,22 +262,27 @@ class CharSelectScene:
                 if self.sel == i:
                     return ("pick", P.CHARACTERS[i])
                 self.sel = i
+                sfx.play("card_select", gap_ms=0)
                 return None
 
             b = self._btn_at(mouse)
             if b == "go":
                 return ("pick", P.CHARACTERS[self.sel])
             if b == "back":
+                sfx.play("ui_back", gap_ms=0)
                 return "back"
 
         elif event.type == pygame.KEYDOWN:
             if event.key in (pygame.K_LEFT, pygame.K_a):
                 self.sel = (self.sel - 1) % len(P.CHARACTERS)
+                sfx.play("ui_hover", gap_ms=0)
             elif event.key in (pygame.K_RIGHT, pygame.K_d):
                 self.sel = (self.sel + 1) % len(P.CHARACTERS)
+                sfx.play("ui_hover", gap_ms=0)
             elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                 return ("pick", P.CHARACTERS[self.sel])
             elif event.key == pygame.K_ESCAPE:
+                sfx.play("ui_back", gap_ms=0)
                 return "back"
 
         return None
@@ -419,6 +425,10 @@ class LoadingScene:
         self.f_big = _font(34)
         self.f_mid = _font(18)
         self.t = 0.0
+        # 「出发」的一阵风声 + 上行纯五度：开门、上路的感觉。
+        # 放在 __init__ 里而不是按钮点击处 —— 点按钮和按回车两条路
+        # 都会走到这里，写在这里两条路都有声，不会漏。
+        sfx.play("floor_clear", gap_ms=0)
 
     def handle(self, event, mouse):
         # 按任意键跳过

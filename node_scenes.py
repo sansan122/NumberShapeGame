@@ -27,6 +27,7 @@ import random
 import pygame
 
 import game_env as E
+import sfx
 # 遗物池放在 player.py —— 地图的路线代价也要发遗物，
 # 放在这个模块里的话 map_scene 反过来 import 本模块，绕成一个环。
 # 卡牌类型的三件套（数字/图形/运算 的主色、浅底、标签）也统一从那里取，
@@ -299,10 +300,14 @@ class RestPanel(Panel):
                                      self.player.hp + self.heal_amount)
                 gained = self.player.hp - before
                 self.player.log("休整：回复 %d 点生命" % gained)
+                # 回血音是「暖流」型的（慢起音、上行三音），
+                # 和打击音完全相反的听感 —— 一听就知道是好消息
+                sfx.play("heal", gap_ms=0)
                 return self.finish()
             if self.btn_upgrade.collidepoint(mouse):
                 if not self.cards:
                     self.msg = "没有可强化的卡"
+                    sfx.play("ui_deny", gap_ms=0)
                     return None
                 self.mode = "pick_card"
                 self.ensure_card_layout()
@@ -334,6 +339,8 @@ class RestPanel(Panel):
             card.desc = "抽 %d 张牌" % eff["draw"]
         card.name = card.name + "+"
         self.player.log("强化了「%s」" % card.name)
+        # 「打磨 + 定音」的金属上行音 —— 强化是永久收益，反馈要够分量
+        sfx.play("upgrade", gap_ms=0)
 
     def draw_body(self, screen, mouse, t):
         if self.mode == "menu":
@@ -457,6 +464,7 @@ class ShopPanel(Panel):
                     self.player.log("从牌库移除了「%s」" % c.name)
                     self.mode = "shop"
                     self.msg = "已移除「%s」" % c.name
+                    sfx.play("coin", gap_ms=0)
                     return None
             return None
 
@@ -465,9 +473,11 @@ class ShopPanel(Panel):
             if self.item_rects[i].collidepoint(mouse):
                 if item["sold"]:
                     self.msg = "这件已经卖掉了"
+                    sfx.play("ui_deny", gap_ms=0)
                     return None
                 if self.player.gold < item["price"]:
                     self.msg = "金币不够（还差 %d）" % (item["price"] - self.player.gold)
+                    sfx.play("ui_deny", gap_ms=0)
                     return None
                 self.buy(item)
                 return None
@@ -476,9 +486,11 @@ class ShopPanel(Panel):
         if self.btn_remove.collidepoint(mouse):
             if self.player.gold < self.removal_price:
                 self.msg = "金币不够（还差 %d）" % (self.removal_price - self.player.gold)
+                sfx.play("ui_deny", gap_ms=0)
                 return None
             if not self.player.deck_cards():
                 self.msg = "牌库是空的"
+                sfx.play("ui_deny", gap_ms=0)
                 return None
             self.mode = "pick_remove"
             # 注意：card_rects 必须在这里（点击时）算好，
@@ -504,10 +516,15 @@ class ShopPanel(Panel):
                 item["desc"], item["cost"], item["effect"])
             self.player.log("买下了「%s」" % item["name"])
             self.msg = "买下「%s」" % item["name"]
+            sfx.play("coin", gap_ms=0)
         else:
             self.player.relics.append(item["name"])
             self.player.log("获得了遗物「%s」" % item["name"])
             self.msg = "获得遗物「%s」" % item["name"]
+            # 花钱 →（0.2 秒）→ 遗物到手。错开是为了让「买到了什么」
+            # 听得出来：两音连在一起就是一句「交易完成，这是你的东西」
+            sfx.play("coin", gap_ms=0)
+            sfx.play_after("relic", 0.20)
 
     def draw_body(self, screen, mouse, t):
         if self.mode == "pick_remove":
@@ -653,6 +670,20 @@ EVENTS = [
 ]
 
 
+#: 事件结果的音效。**按 fn（发生的事）分类，不按文案猜** ——
+#: 以后文案改了，声音不会跟着错。拿不准的就用 ui_click（中性的确认音）。
+_EVENT_SFX = {
+    "nothing": "ui_back",
+    "lose_hp_gain_relic": "relic",
+    "gain_max_hp": "heal",
+    "gain_gold": "coin",
+    "gold_cost_hp": "coin",
+    "gold_for_maxhp": "heal",
+    "remove_card": "card_play",
+    "upgrade_card": "upgrade",
+}
+
+
 class EventPanel(Panel):
     title = "事件"
     subtitle = ""
@@ -690,6 +721,7 @@ class EventPanel(Panel):
     def apply(self, opt):
         fn = opt["fn"]
         p = self.player
+        ok = True          # 这件事成没成。金币不够 / 牌库空 = 没成，声音要换
         if fn == "nothing":
             self.msg = "你只是路过。"
         elif fn == "lose_hp_gain_relic":
@@ -722,6 +754,7 @@ class EventPanel(Panel):
         elif fn == "gold_for_maxhp":
             if p.gold < 20:
                 self.msg = "金币不够，他摆摆手让你过去。"
+                ok = False
             else:
                 p.gold -= 20
                 p.max_hp += 10
@@ -737,6 +770,7 @@ class EventPanel(Panel):
                 p.log("事件：移除「%s」" % c.name)
             else:
                 self.msg = "牌库是空的，什么也没发生。"
+                ok = False
         elif fn == "upgrade_card":
             cards = p.deck_cards()
             if cards:
@@ -756,7 +790,11 @@ class EventPanel(Panel):
                 p.log("事件：强化「%s」" % c.name)
             else:
                 self.msg = "牌库是空的，什么也没发生。"
+                ok = False
 
+        # 结果音：办成了用奖励音，没办成用拒绝音
+        sfx.play(_EVENT_SFX.get(fn, "ui_click") if ok else "ui_deny",
+                 gap_ms=0)
         self.chosen = opt
         p.hp = max(0, min(p.hp, p.max_hp))
 
@@ -851,6 +889,7 @@ class TreasurePanel(Panel):
 
     def open(self):
         self.opened = True
+        sfx.play("card_draw", gap_ms=0)          # 掀开箱盖的「唰」
         got = roll_unowned_relic(self.player)
         if got:
             self.relic_name, self.relic_desc = got
@@ -861,6 +900,9 @@ class TreasurePanel(Panel):
                 # 补进描述里显示，不另开一行（面板下半部分是按钮，挤不下）
                 self.relic_desc = self.relic_desc + "（" + note + "）"
             self.player.log("宝箱：获得遗物「%s」" % self.relic_name)
+            # 延迟一点再响：让「开箱」和「拿到遗物」听成两件事，
+            # 而不是糊成一声。0.22 秒是人耳能分开、又不觉得慢的间隔。
+            sfx.play_after("relic", 0.22)
         else:
             self.relic_name = "遗物已集齐"
             self.relic_gold = 40
@@ -868,6 +910,7 @@ class TreasurePanel(Panel):
                                % self.relic_gold)
             self.player.gold += self.relic_gold
             self.player.log("宝箱：遗物已集齐，+%d 金币" % self.relic_gold)
+            sfx.play_after("coin", 0.22)
         self.msg = ""
 
     def draw_body(self, screen, mouse, t):
@@ -953,11 +996,14 @@ class SpoilsPanel(Panel):
                 if note:
                     self.relic_desc = self.relic_desc + "（" + note + "）"
                 player.log("战利品：获得遗物「%s」" % self.relic_name)
+                # 面板一打开就响钟琴 —— 打赢精英/层主之后该有的那份「贵重」感
+                sfx.play("relic", gap_ms=0)
             else:
                 # 遗物全拿完了就别硬塞重复的（效果按名字算，重复等于白给）
                 self.relic_gold = 40
                 player.gold += self.relic_gold
                 player.log("战利品：遗物已集齐，折现 +%d 金币" % self.relic_gold)
+                sfx.play("coin", gap_ms=0)
 
         # ---- 布局（和宝箱面板同一套尺寸，看着像一家人）----
         self.result_rect = pygame.Rect(WIDTH // 2 - 300, 190, 600, 250)
@@ -999,10 +1045,12 @@ class SpoilsPanel(Panel):
                 what = upgrade_card(self.player, c)
                 if not what:
                     self.msg = "「%s」没有可强化的数值，换一张" % c.name
+                    sfx.play("ui_deny", gap_ms=0)
                     return None
                 self.upgraded.append(c.name)
                 self.upgrade_quota -= 1
                 self.cards.remove(c)        # 同一张卡在一次面板里只强化一次
+                sfx.play("upgrade", gap_ms=0)
                 if self.upgrade_quota <= 0 or not self.cards:
                     return self.finish()
                 self.card_rects = card_grid_rects(len(self.cards))

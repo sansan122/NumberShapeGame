@@ -4,6 +4,9 @@ map_tools/out/*.json
 tmp/
 saves/
 
+# 音效开关（F1/F2）的本地记忆，属于用户数据；开发时落在项目根
+audio.json
+
 # PyInstaller 打包产物
 build/
 dist/

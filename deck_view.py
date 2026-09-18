@@ -26,6 +26,7 @@ import pygame
 
 import game_env as E
 import art_shapes
+import sfx
 # 卡牌类型的三件套（数字 / 图形 / 运算）统一从 player 取 ——
 # 战斗、牌组、商店三处必须同色，否则玩家会以为「平方」是一种新东西。
 from player import CARD_TYPE_STYLE, card_color, card_soft, type_label
@@ -117,9 +118,11 @@ class DeckView:
         self.scroll = 0.0
         self.scroll_target = 0.0
         self._relayout()
+        sfx.play("card_draw", gap_ms=0)      # 翻开牌组的「唰」
 
     def close(self):
         self.open = False
+        sfx.play("ui_back", gap_ms=0)
 
     def toggle(self, cards, char=None):
         if self.open:

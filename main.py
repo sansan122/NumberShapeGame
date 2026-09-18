@@ -34,6 +34,7 @@ import map_scene as M            # noqa: E402
 import node_scenes as NS         # noqa: E402
 import save_system               # noqa: E402
 import player as P               # noqa: E402
+import sfx                       # noqa: E402
 import ui_scenes as UI           # noqa: E402
 import deck_view                 # noqa: E402
 import build_map as B            # noqa: E402
@@ -167,17 +168,23 @@ class Game:
 
         if not self.map.can_move_to(nid):
             self.flash("只能走到高亮的下一个节点")
+            sfx.play("ui_deny", gap_ms=0)
             return
 
         # 付代价 + 移动
         self.map.move_to(nid)
         self.pending_node = node
+        # 走路的声音（地图模式不走通用点击音，见 _want_click_sound）
+        sfx.play("node_move", gap_ms=0)
 
         if ntype in BATTLE_TYPES:
             mult = getattr(self.map, "enemy_hp_mult", 1.0)
             self.battle = BattleScene(self.player, ntype, mult)
             self.mode = "battle"
             self.flash("遭遇 %s！" % ENEMY_KINDS[ntype]["name"])
+            # 两下战鼓。压在 node_move 之后 0.15 秒，听感上是
+            # 「走过去 → 抬头看见敌人」，而不是两件事同时发生。
+            sfx.play_after("battle_start", 0.15)
         else:
             panel = NS.make_panel(ntype, self.player)
             if panel is None:
@@ -198,6 +205,7 @@ class Game:
 
         if node and node["row"] == self.map.row_count - 1:
             self.flash("本层通过！前往下一层")
+            sfx.play("floor_clear", gap_ms=0)
             self.next_floor()
 
     def next_floor(self):
@@ -347,8 +355,10 @@ class Game:
                     self.map.target = nd["id"]
                     self.map.path_hint = p
                     self.map.push_log("查看路径：%d 步" % len(p))
+                    sfx.play("ui_hover", gap_ms=0)
                 else:
                     self.flash("从当前位置无法到达")
+                    sfx.play("ui_deny", gap_ms=0)
         return None
 
     def handle_node(self, event, mouse):
@@ -423,7 +433,8 @@ class Game:
         if self.mode == "map":
             self.map.draw(screen, mouse, t_ms)
             self.draw_player_panel(screen)
-            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　D 看牌组　·　S 存档　L 读档　·　M 主菜单　·　ESC 退出")
+            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　D 看牌组　·　S 存档　L 读档　·　M 主菜单　·　ESC 退出"
+                           + sfx.key_hint())
         elif self.mode == "node":
             self.panel.draw(screen, mouse, t_ms)
         elif self.mode == "battle":
@@ -548,6 +559,68 @@ def make_window_icon():
     return icon
 
 
+def _hover_key(obj):
+    """把「鼠标此刻悬停在哪个可点元素上」压成一个可以比较的键。
+
+    各个 UI 场景记录悬停用的属性名不一样（hover / hover_card / hover_btn /
+    hover_back …），所以这里统一探一遍。好处是**主循环只需要知道这一件事**：
+    以后加一个新场景、换了属性名，改这里一行就行，不用去事件循环里翻。
+
+    返回 None = 没悬停在任何东西上。
+    """
+    if obj is None:
+        return None
+    parts = []
+    for attr in ("hover", "hover_card", "hover_btn", "hover_back", "hover_idx"):
+        v = getattr(obj, attr, None)
+        if v not in (None, -1, False, ""):
+            parts.append("%s=%r" % (attr, v))
+    return "|".join(parts) or None
+
+
+def _want_click_sound(paused, game):
+    """这一屏要不要给「通用点击音」。
+
+    UI 界面（主菜单 / 选角 / 存档槽）和节点面板（商店 / 休整 / 事件 / 宝箱）
+    上按钮很多，与其给每个按钮各挂一句（几十处，早晚漏几个），
+    不如在这一处统一给一声。谁有更贴切的声音（买货、回血）再叠一个 ——
+    听感上就是「咔哒 → 叮」，和真实游戏一模一样。
+
+    **战斗里绝对不能给**：战斗的每个操作都有更贴切的专属音效
+    （选卡 / 出牌 / 答题 / 打击），再叠一记咔哒只会糊成一团。
+    """
+    if paused is not None:
+        return True
+    if game is None:
+        return True
+    return game.mode == "node"
+
+
+def _sync_bgm(paused, game):
+    """按「现在在哪一屏」切换背景音乐。
+
+    放在主循环这一处统一决定，而不是让每个场景在自己 update 里调 ——
+    场景有六七个，每个都写一句 play_bgm，早晚会漏掉一个，
+    而漏掉的那一屏会一直放着上一屏的音乐（或者干脆没声音）。
+    主循环每帧问一次「这一屏该放哪首」，永远不会有漏网的屏。
+    """
+    if paused is not None:
+        # 存档槽界面是「暂停在游戏上」，音乐留着不断更有连续感
+        return
+    if game is None:
+        track = "bgm_explore"           # 主菜单 / 选角 / 过场
+    elif game.mode == "battle":
+        track = "bgm_battle"
+    elif game.mode == "dead":
+        track = None                    # 阵亡画面安安静静
+    else:
+        track = "bgm_explore"           # 地图 / 商店 / 休整 / 事件
+    if track:
+        sfx.play_bgm(track)
+    else:
+        sfx.stop_bgm()
+
+
 def main():
     """主循环。
 
@@ -562,11 +635,20 @@ def main():
     # 正常的 KEYDOWN。这个环境变量必须在 init 之前设置才会生效。
     os.environ["SDL_IME_SHOW_UI"] = "0"
 
+    # 混音器参数要在 pygame.init() **之前**定好：音效是合成出来的，
+    # 采样率必须是 22050Hz（见 sfx.py 顶部）。晚了就得关掉重开一次混音器。
+    sfx.pre_init()
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     pygame.display.set_caption(WINDOW_TITLE)
     pygame.display.set_icon(make_window_icon())
     clock = pygame.time.Clock()
+
+    # 起音频。**这一步不会卡启动**：音效在后台线程里合成，这里只是把
+    # 混音器开起来（约 70ms）。没有声卡的机器会安静地失败，游戏照常玩。
+    sfx.init()
+    print(E.describe_environment())
+    print(sfx.describe())
 
     # 游戏全程不需要文字输入，主动停掉 SDL 的 text input 通道，
     # 进一步保证 IME 不会拦走按键（战斗答题用的是 KEYDOWN 的 key 码，
@@ -577,12 +659,16 @@ def main():
     scene = _menu_scene()
     game = None                 # 正式开局后才建
     paused_game = None          # 非 None = 游戏暂停在存档槽选择界面
+    last_hover = None           # 上一帧鼠标悬停在哪个按钮上（变了好出声）
 
     running = True
     while running:
         dt = clock.tick(60) / 1000.0
         mouse = pygame.mouse.get_pos()
         t_ms = pygame.time.get_ticks()
+
+        # 音频每帧推进：收取后台合成好的音效、跑延时队列、推 BGM 淡入淡出
+        sfx.update(dt)
 
         # 当前这一帧要画谁：
         #   游戏暂停在存档槽界面 -> 画存档槽
@@ -592,10 +678,34 @@ def main():
         else:
             active = game if game is not None else scene
 
+        _sync_bgm(paused_game, game)
+
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
                 break
+
+            # ---------- F1 / F2：音频开关（哪个界面都能按）----------
+            # 小朋友的家长最需要这两个键 —— 上课 / 睡觉时一键静音，
+            # 不用去翻设置文件。开关会记住，下次打开还是这个状态。
+            if ev.type == pygame.KEYDOWN and ev.key in (pygame.K_F1,
+                                                        pygame.K_F2):
+                if ev.key == pygame.K_F1:
+                    label = "音效已开" if sfx.toggle_sfx() else "音效已关"
+                else:
+                    label = "音乐已开" if sfx.toggle_bgm() else "音乐已关"
+                sfx.play("ui_click", gap_ms=0)
+                target = paused_game if paused_game is not None else game
+                if target is not None:
+                    target.flash(label)
+                continue
+
+            # ---------- 通用点击音 ----------
+            # 放在分派**之前**：这一声是「按到了东西」的基础反馈，
+            # 场景里有更贴切的声音会紧接着叠上来。
+            if (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1
+                    and _want_click_sound(paused_game, game)):
+                sfx.play("ui_click", gap_ms=0)
 
             # ---------- 游戏暂停在存档槽选择界面 ----------
             if paused_game is not None:
@@ -695,6 +805,16 @@ def main():
         if not running:
             break
 
+        # ---------- 鼠标划过按钮的轻响 ----------
+        # 每帧比一次「悬停目标变了没有」，而不是塞进上面的事件循环里 ——
+        # 那个循环里有十几处 continue，任何一处漏掉都会让某个界面的
+        # 按钮变成哑的。场景只在 MouseMotion 时更新 hover 属性，
+        # 所以帧与帧之间比较这个值就够了。
+        hk = _hover_key(active)
+        if hk is not None and hk != last_hover:
+            sfx.play("ui_hover", gap_ms=45)
+        last_hover = hk
+
         # 过渡场景自己倒数，到点就真的开一局
         if paused_game is None and game is None:
             r = scene.update(dt)
@@ -713,6 +833,7 @@ def main():
         active.draw(screen, mouse, t_ms)
         pygame.display.flip()
 
+    sfx.shutdown()
     pygame.quit()
     sys.exit()
 

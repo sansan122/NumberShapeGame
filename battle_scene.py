@@ -28,6 +28,7 @@ import pygame
 import game_env as E
 import char_art
 import art_shapes
+import sfx
 from player import (Card, DIFF_DESC, card_color, card_soft, difficulty_name,
                     difficulty_tier, type_label)
 
@@ -90,6 +91,48 @@ DECO_SYMBOLS = [
     ("λ", 368, 444), ("φ", 596, 322),
 ]
 DECO_SYMBOL_SIZE = 52
+
+
+# ==================== 打击感（视觉侧） ====================
+# 「打击感」一半靠音效，另一半靠画面。这一节是视觉侧的三件套：
+# 屏幕震动、受击闪白、飘出的伤害数字。
+#
+# 三者**共用同一张伤害分档表**（DMG_TIERS）：打 4 点和打 81 点，听到的
+# 声音、抖的幅度必须是同一档 —— 否则会出现「听到轻击、画面却大地震」
+# 这种对不上的情况，玩家立刻就觉得假。
+
+#: 屏幕震动：持续时长（秒）与幅度上限（像素）
+SHAKE_LIFE = 0.30
+SHAKE_MAX = 15.0
+#: 受击闪白 / 玩家挨打时整屏泛红的持续时长
+FLASH_LIFE = 0.14
+HURT_LIFE = 0.34
+#: 飘字存活时长 / 上升像素
+POP_LIFE = 0.85
+POP_RISE = 52.0
+
+#: 伤害分档：(伤害上限, 音效名, 震动幅度)。上限 None = 不封顶那一档。
+#:
+#: 幅度差做得很明显 —— 1~6 点几乎不振（1.5px，只是「有反馈」），
+#: 81 点的平方组合振满 15px。差了 10 倍，玩家不看数字也知道这一下有多重。
+DMG_TIERS = (
+    (6, "hit_light", 1.5),
+    (14, "hit_mid", 4.0),
+    (29, "hit_heavy", 8.5),
+    (None, "hit_massive", SHAKE_MAX),
+)
+
+
+def impact_tier(dmg):
+    """按伤害量选「音效 + 震动幅度」，返回 (音效名, 像素)。
+
+    音效和震动**从这里一起取**，就是为了保证两者永远同档 ——
+    分成两处各判一次，早晚有人改了一处忘了另一处。
+    """
+    for cap, name, mag in DMG_TIERS:
+        if cap is None or dmg <= cap:
+            return name, mag
+    return DMG_TIERS[-1][1], DMG_TIERS[-1][2]
 
 
 def deco_symbol_offset(i, t_ms):
@@ -471,7 +514,10 @@ class BattleScene:
         random.shuffle(self.deck)
         self.hand = []
         self.discard = []
+        # 发牌不出声（见 draw_cards 里的 _quiet_draw）
+        self._quiet_draw = True
         self.draw_cards(5 + self.draw_bonus)
+        self._quiet_draw = False
 
         # ---- 交互 ----
         self.sel_card = None
@@ -484,6 +530,14 @@ class BattleScene:
 
         self.done = False
         self.result = None
+
+        # ---- 打击感：震动 / 闪白 / 飘字（见模块顶部那一节）----
+        self.shake_t = 0.0            # 震动剩余时长（秒）
+        self.shake_mag = 0.0          # 这次震动多大
+        self.e_flash = 0.0            # 敌人闪白剩余时长
+        self.hurt_flash = 0.0         # 玩家挨打时整屏泛红剩余时长
+        self.pops = []                # 飘字（dict 列表，见 pop()）
+        self._canvas = None           # 震动用的离屏画布（惰性创建，见 draw）
 
         # ---- 遗物效果 ----
         self.extra_block_first = 0
@@ -524,6 +578,7 @@ class BattleScene:
         """抽 n 张牌。
         注意：这个方法原来叫 draw()，会和「画一帧」的 draw(screen, mouse, t_ms)
         撞名，导致后者被覆盖 —— 所以改名成 draw_cards。"""
+        before = len(self.hand)
         for _ in range(n):
             if not self.deck:
                 self.deck = self.discard[:]
@@ -531,6 +586,155 @@ class BattleScene:
                 random.shuffle(self.deck)
             if self.deck and len(self.hand) < 8:
                 self.hand.append(self.deck.pop())
+        # 真抽到牌才出声（牌库和弃牌堆都空的时候硬抽是无声的，别骗玩家）。
+        # 开局那一手是「发牌」，不算玩家的操作，所以静音 —— 不然进战斗
+        # 先听见一阵唰唰的抽牌声，像玩家自己点了七下。
+        if (len(self.hand) > before
+                and not getattr(self, "_quiet_draw", False)):
+            sfx.play("card_draw", gap_ms=120)
+
+    # ==================== 打击感 ====================
+    def shake(self, mag):
+        """请求一次屏幕震动。
+
+        取**最大值**而不是累加：连击时如果每一下都往上叠幅度，
+        画面会抖到看不清手牌 —— 反馈过度反而妨碍玩家操作。
+        """
+        if mag > self.shake_mag:
+            self.shake_mag = mag
+        self.shake_t = SHAKE_LIFE
+
+    def pop(self, text, x, y, col, size=26):
+        """在 (x, y) 冒一行会往上飘、会淡出的字。
+
+        文字在**创建时**就渲染好存起来，不是每帧现渲 ——
+        飘字带白色描边（要渲两遍），每帧重渲会白白吃掉几毫秒。
+
+        存成 dict 而不是「(图, 边, x, y, t)」这种元组：元组要靠下标读，
+        以后加一个字段（比如「跟谁一起飘」）就得把所有下标数一遍，
+        改漏一处就是画错位置。名字长一点，但不会错。
+        """
+        font = E.load_font(size, bold=True)
+        self.pops.append({
+            "text": text,
+            "surf": font.render(text, True, col),
+            "edge": font.render(text, True, (255, 255, 255)),
+            "x": float(x),
+            "y": float(y),
+            "t": 0.0,
+        })
+
+    def update_fx(self, dt):
+        """推进震动 / 闪白 / 飘字的生命周期。"""
+        if self.shake_t > 0.0:
+            self.shake_t = max(0.0, self.shake_t - dt)
+            if self.shake_t == 0.0:
+                self.shake_mag = 0.0
+        if self.e_flash > 0.0:
+            self.e_flash = max(0.0, self.e_flash - dt)
+        if self.hurt_flash > 0.0:
+            self.hurt_flash = max(0.0, self.hurt_flash - dt)
+        if self.pops:
+            alive = []
+            for p in self.pops:
+                p["t"] += dt
+                if p["t"] < POP_LIFE:
+                    alive.append(p)
+            self.pops = alive
+
+    def draw_pops(self, screen):
+        """画飘字：先快后慢地上升，后 45% 淡出。"""
+        for p in self.pops:
+            k = p["t"] / POP_LIFE
+            yy = int(p["y"] - POP_RISE * (1.0 - (1.0 - k) ** 2))
+            surf, edge = p["surf"], p["edge"]
+            if k > 0.55:
+                # 淡出用 set_alpha（临时改一下，画完恢复），不复制 Surface
+                surf.set_alpha(max(0, int(255 * (1.0 - (k - 0.55) / 0.45))))
+            r = surf.get_rect(center=(p["x"], yy))
+            for dx, dy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+                screen.blit(edge, r.move(dx, dy))
+            screen.blit(surf, r)
+            surf.set_alpha(255)
+
+    def draw_overlays(self, screen):
+        """受击闪白（敌人）/ 挨打泛红（整屏）。画在最上层。"""
+        if self.e_flash > 0.0:
+            a = 200.0 * (self.e_flash / FLASH_LIFE)
+            r0 = self.E_R + 26
+            # 三层同心圆叠出「由内向外衰减」的柔边。
+            # 直接画一个实心白圆会露出一圈生硬的白边，看着像在敌人身上
+            # 贴了张白纸；打击感要的是「闪一下」，不是「糊一块白的」。
+            veil = pygame.Surface((r0 * 2, r0 * 2), pygame.SRCALPHA)
+            for k, f in ((1.00, 0.30), (0.80, 0.30), (0.58, 0.35)):
+                pygame.draw.circle(veil, (255, 255, 255, int(a * f)),
+                                   (r0, r0), int(r0 * k))
+            screen.blit(veil, (self.E_X - r0, self.E_CY - r0))
+        if self.hurt_flash > 0.0:
+            a = int(78 * (self.hurt_flash / HURT_LIFE))
+            if a > 0:
+                v = self._red_veil()
+                v.set_alpha(a)
+                screen.blit(v, (0, 0))
+
+    def _red_veil(self):
+        """整屏泛红用的纯色层（建一次就够，逐帧只改 alpha）。"""
+        if getattr(self, "_veil", None) is None:
+            self._veil = pygame.Surface((WIDTH, HEIGHT))
+            self._veil.fill((188, 44, 44))
+        return self._veil
+
+    def _canvas_surface(self):
+        """震动用的离屏画布（惰性创建：不抖的战斗一帧都不会多花这块内存）。"""
+        if self._canvas is None:
+            self._canvas = pygame.Surface((WIDTH, HEIGHT))
+        return self._canvas
+
+    def _shake_offset(self, t_ms):
+        """当前帧的屏幕偏移量。
+
+        偏移量用两个不同频率的正弦合成，**不要用 random**：
+        随机数每帧乱跳看着像花屏/掉帧，正弦是连续来回，
+        才像「被砸得晃了一下」。
+        """
+        if self.shake_t <= 0.0:
+            return 0, 0
+        k = self.shake_t / SHAKE_LIFE            # 1 -> 0
+        m = self.shake_mag * k * k               # 二次衰减：起手猛，很快收住
+        return (int(m * math.sin(t_ms * 0.085)),
+                int(m * math.cos(t_ms * 0.117)))
+
+    def hit_feedback(self, dmg, actual, x=None, y=None):
+        """一次伤害的全部反馈：音效 + 震动 + 闪白 + 飘字。**只走这一条路**。
+
+        三个调用方（单卡 / 面积组合 / 平方组合）都收敛到这里，
+        所以「81 点打得比 4 点狠」这件事只有一份实现。
+
+        dmg    本次基础伤害（含加成，用来分档）
+        actual 真正打掉的血（被格挡减过，可能是 0）
+        """
+        if x is None:
+            x = self.E_X
+        if y is None:
+            y = self.E_CY - self.E_R - 12
+
+        if actual <= 0:
+            # 全被格挡挡下了：金属「铛」+ 不震屏（没打穿，不该有分量感）
+            sfx.play("hit_block", gap_ms=0)
+            self.pop("格挡", x, y - 16, ACCENT, 24)
+            self.e_flash = FLASH_LIFE * 0.5
+            return
+
+        name, mag = impact_tier(dmg)
+        sfx.play(name, gap_ms=0)
+        self.shake(mag)
+        self.e_flash = FLASH_LIFE
+        # 飘字字号跟着伤害长：打 4 点是 24 号，打 81 点是 46 号
+        size = int(min(46, 23 + actual * 0.55))
+        self.pop("−%d" % actual, x, y, RED, size)
+        if dmg >= 30:
+            # 巨额伤害再补一行「暴击式」的赞美，强化「这一下很大」的感觉
+            self.pop("厉害！", x, y + 40, AMBER, 26)
 
     # ==================== 出题 ====================
     #: 平方题的示例用哪几个数（示例必须避开本题要算的那个数 —— 否则
@@ -632,6 +836,16 @@ class BattleScene:
                                    box.y + 240 + row * (h + gap), w, h))
         return out
 
+    def _quiz_pop_y(self, q):
+        """答题反馈的飘字该出现在哪个高度：正好压在题目框上方。
+
+        算术题用小的 QUIZ_BOX（y=300），其它三种用大的 QUIZ_BOX_FIG（y=140），
+        所以高度必须按题型算 —— 写死一个值必然有一种题型被框压住。
+        """
+        box = (self.QUIZ_BOX if q.get("kind", "arith") == "arith"
+               else self.QUIZ_BOX_FIG)
+        return box.top - 30
+
     def submit_quiz(self):
         """交卷判题。四种题型的对错判定不一样，答对之后的结算也不一样：
         算术题 / 认图形 -> 单卡结算；面积题 / 平方题 -> 两张卡一起结算。"""
@@ -650,6 +864,13 @@ class BattleScene:
             correct = got == q["ans"]
 
         if correct:
+            # 组合题（面积 / 平方）用更华丽的 combo_ok：组合要花两张卡、
+            # 答一道更难的题，反馈必须明显比单卡更强，玩家才觉得划算。
+            # 它紧接着还会叠一发 hit_massive，两段自然连成
+            # 「组合成立 → 重锤落下」，这是全游戏最爽的一拍。
+            sfx.play("combo_ok" if kind in ("area", "square") else "answer_ok",
+                     gap_ms=0)
+            self.pop("答对了！", WIDTH // 2, self._quiz_pop_y(q), GREEN, 30)
             if kind == "arith":
                 self.log.insert(0, "✓ %s = %d　算对了！" % (q["expr"], q["ans"]))
                 self.resolve_card(q["card"])
@@ -665,6 +886,10 @@ class BattleScene:
                                 % q["options"][q["ans_idx"]])
                 self.resolve_card(q["card"])
         else:
+            # 答错音刻意做得柔和（见 sfx.answer_no）：卡牌失效的惩罚已经
+            # 够重了，再来一记刺耳蜂鸣，下次孩子就不敢点提交了。
+            sfx.play("answer_no", gap_ms=0)
+            self.pop("再想想～", WIDTH // 2, self._quiz_pop_y(q), RED, 26)
             if kind == "arith":
                 self.log.insert(0, "✗ %s = %d　算错了，卡牌失效"
                                 % (q["expr"], q["ans"]))
@@ -731,6 +956,10 @@ class BattleScene:
             self.e_hp -= actual
             self.p_anim.play("attack")     # 打出伤害 -> 播攻击动作
             self.log.insert(0, "造成 %d 点伤害" % actual)
+            # 打击反馈的**唯一出口**：音效分档 + 震屏 + 闪白 + 飘字。
+            # 单卡 / 面积组合 / 平方组合三条路都汇到这一句，所以
+            # 「81 点比 4 点打得狠」这件事只有一份实现，不可能走偏。
+            self.hit_feedback(dmg, actual)
 
         if "block" in eff:
             gain = eff["block"]
@@ -741,6 +970,10 @@ class BattleScene:
                 self.log.insert(0, "「勾股定理」生效：+3 格挡")
             self.p_block += gain
             self.log.insert(0, "获得 %d 点格挡" % gain)
+            # 上盾和被敲是两件事，用两个不同的音（shield ≠ hit_block）
+            sfx.play("shield", gap_ms=0)
+            self.pop("+%d 格挡" % gain, self.P_X + 96, self.P_SYM_CY - 30,
+                     ACCENT, 22)
 
         if "draw" in eff:
             self.draw_cards(eff["draw"])
@@ -749,6 +982,7 @@ class BattleScene:
         if eff.get("strip"):
             self.e_block = 0
             self.log.insert(0, "清空了敌人的格挡")
+            sfx.play("hit_block", vol=0.7, gap_ms=0)
 
     def resolve_card(self, card):
         """单卡生效（算术题 / 认图形题答对之后）。"""
@@ -802,19 +1036,32 @@ class BattleScene:
     def check_end(self):
         if self.e_hp <= 0:
             self.e_hp = 0
+            first = not self.done           # check_end 会被调很多次，只演一次
             self.phase = "win"
             self.result = "win"
             self.done = True
             self.player.gold += self.reward_gold
             self.player.hp = max(0, self.p_hp)
             self.player.log("战斗胜利，+%d 金币" % self.reward_gold)
+            if first:
+                # 结算演出：敌人倒地 →（0.5s）号角 →（1.05s）金币入袋。
+                # 三个音**必须错开**：同时播只会糊成一坨噪音，
+                # 而「先后顺序」本身就是一段小小的胜利演出。
+                sfx.play("enemy_die", gap_ms=0)
+                sfx.play_after("win", 0.5)
+                sfx.play_after("coin", 1.05)
         elif self.p_hp <= 0:
             self.p_hp = 0
+            first = not self.done
             self.phase = "lose"
             self.result = "lose"
             self.done = True
             self.player.hp = 0
             self.player.log("倒在了 %s 面前" % self.e_name)
+            if first:
+                # 战败音刻意柔和（见 sfx.lose）：孩子输一局本来就难受，
+                # 再来一段沉重的音乐，下次就不想打开了
+                sfx.play("lose", gap_ms=0)
 
     # ==================== 回合 ====================
     def end_turn(self):
@@ -839,14 +1086,28 @@ class BattleScene:
             if actual > 0:
                 self.p_anim.play("hit")    # 真的挨了打 -> 播受击动作
                 self.log.insert(0, "敌人攻击，造成 %d 点伤害" % actual)
+                # 挨打反馈：闷响（比打击音柔和一档）+ 整屏泛红 + 飘字。
+                # 刻意不震屏 —— 屏幕震动是「我打中了」的爽感，被揍也震
+                # 会把这个信号搞混。
+                sfx.play("hurt", gap_ms=0)
+                self.hurt_flash = HURT_LIFE
+                self.pop("−%d" % actual, self.P_X, 248, RED, 26)
             else:
                 self.log.insert(0, "敌人攻击，被格挡挡下了")
+                sfx.play("hit_block", gap_ms=0)
+                self.pop("挡下了", self.P_X, 248, ACCENT, 24)
         elif self.e_intent == "block":
             self.e_block += 8
             self.log.insert(0, "敌人获得 8 点格挡")
+            sfx.play("shield", gap_ms=0)
+            self.pop("+8 格挡", self.E_X + 96, self.E_CY - self.E_R - 60,
+                     ACCENT, 22)
         elif self.e_intent == "buff":
             self.e_intent_val += 3
             self.log.insert(0, "敌人强化，下次攻击 +3")
+            sfx.play("upgrade", vol=0.8, gap_ms=0)
+            self.pop("强化 +3", self.E_X + 96, self.E_CY - self.E_R - 60,
+                     PURPLE, 22)
 
         self.check_end()
         if self.phase == "enemy":
@@ -862,6 +1123,8 @@ class BattleScene:
             self.first_number_used = False          # 新回合，直感重置
             self._eq_used = False
             n = 5 + self.draw_bonus + (1 if self.player.has_relic("对数尺") else 0)
+            # 回合开始的「叮」比抽牌声早一点，两者才不会糊在一起
+            sfx.play("turn_start", gap_ms=0)
             self.draw_cards(n)
             self.roll_intent()
             self.phase = "player"
@@ -914,10 +1177,13 @@ class BattleScene:
         cost = combo_cost(num, other)
         if self.p_energy < cost:
             self.log.insert(0, "能量不足！组合需要 %d 点能量" % cost)
+            sfx.play("ui_deny", gap_ms=0)
             return False
         self.p_energy -= cost
         self.log.insert(0, "组合费用 %d 点能量（%d + %d − %d 优惠）"
                         % (cost, num.cost, other.cost, COMBO_DISCOUNT))
+        # 起手先来一段上行蓄力音，把「接下来这一下会很疼」预告出去
+        sfx.play("combo_charge", gap_ms=0)
         self.quiz = (self.make_area_quiz(num, other) if kind == "area"
                      else self.make_square_quiz(num, other))
         self.clear_selection()
@@ -931,17 +1197,23 @@ class BattleScene:
                 self.submit_quiz()
             elif event.key == pygame.K_BACKSPACE:
                 q["pick"] = None
+                sfx.play("key_tap", vol=0.6, gap_ms=40)
             elif event.unicode in ("1", "2", "3", "4"):
                 i = int(event.unicode) - 1
                 if i < len(q["options"]):
                     q["pick"] = i
+                    sfx.play("card_select", vol=0.8, gap_ms=0)
             return
         if event.key == pygame.K_BACKSPACE:
             q["input"] = q["input"][:-1]
+            sfx.play("key_tap", vol=0.6, gap_ms=40)
         elif event.key == pygame.K_RETURN:
             self.submit_quiz()
         elif event.unicode.isdigit() and len(q["input"]) < 4:
             q["input"] += event.unicode
+            # 每次敲键都出声，但限流 40ms：一秒敲五下听着像机关枪，
+            # 那一串「哒哒哒」会盖住答题该有的专注感
+            sfx.play("key_tap", vol=0.85, gap_ms=40)
 
     def _quiz_click(self, mouse):
         """答题弹窗里的点击：认图形题的选项按钮 + 提交按钮。"""
@@ -949,6 +1221,7 @@ class BattleScene:
         for i, r in enumerate(q.get("option_rects", [])):
             if r.collidepoint(mouse):
                 q["pick"] = i
+                sfx.play("card_select", gap_ms=0)
                 return
         if q.get("submit_rect", self.BTN_SUBMIT).collidepoint(mouse):
             self.submit_quiz()
@@ -978,6 +1251,7 @@ class BattleScene:
             return None
 
         if self.phase == "player" and self.BTN_END.collidepoint(mouse):
+            sfx.play("ui_click", gap_ms=0)
             self.end_turn()
             return None
 
@@ -986,6 +1260,7 @@ class BattleScene:
             for c in self.hand:
                 if c.rect and c.rect.collidepoint(mouse):
                     if c.selected:
+                        sfx.play("card_deselect", gap_ms=0)
                         self.clear_selection()
                         return None
                     # 已经选了一张，再点**能配对的另一类**卡 -> 组合，
@@ -1002,6 +1277,8 @@ class BattleScene:
                     self.sel_card = c
                     self.pending_number = c if c.ctype == "number" else None
                     self.combo_hint = self.hint_for(c)
+                    # 选卡是最高频的操作，限流 55ms：连点几张时不会叠成噪音
+                    sfx.play("card_select", gap_ms=55)
                     return None
 
             # 点空白 = 打出选中的卡
@@ -1012,10 +1289,16 @@ class BattleScene:
                 if card.ctype == "op":
                     self.log.insert(0, "「%s」不能单出 —— 要配一张数字卡"
                                     % card.name)
+                    sfx.play("ui_deny", gap_ms=0)
+                    self.pop("不能单出！", self.P_X, self.P_SYM_CY - 120,
+                             AMBER, 26)
                     self.clear_selection()
                     return None
                 if self.p_energy < card.cost:
                     self.log.insert(0, "能量不足！")
+                    sfx.play("ui_deny", gap_ms=0)
+                    self.pop("能量不足", self.P_X, self.P_SYM_CY - 120,
+                             AMBER, 26)
                     return None
                 self.p_energy -= card.cost
                 # 图形卡上没有数字，单独打出考「认图形名称」；
@@ -1024,10 +1307,14 @@ class BattleScene:
                     self.quiz = self.make_name_quiz(card)
                 else:
                     self.quiz = self.make_quiz(card)
+                sfx.play("card_play", gap_ms=0)
+                sfx.play_after("quiz_open", 0.12)   # 出牌音之后题目再弹出来
                 self.clear_selection()
         return None
 
     def update(self, dt):
+        # 推进打击感特效（震动 / 闪白 / 飘字）
+        self.update_fx(dt)
         # 推进玩家立绘动画（dt 是秒，帧时长是毫秒）
         self.p_anim.tick(dt * 1000.0)
         # 敌人回合的自动推进
@@ -1369,6 +1656,16 @@ class BattleScene:
         screen.blit(num, num.get_rect(center=(cx + 16, cy + 20)))
 
     def draw(self, screen, mouse, t_ms):
+        # ---- 屏幕震动：先画到离屏画布，最后整体偏移贴到屏幕上 ----
+        # 用了个小技巧：把参数 screen 换成画布，下面**整段绘制代码一个字都不用改**
+        # ——它们照旧用 screen 这个名字画，只是此刻 screen 指向画布。
+        # 要动的地方越少，漏改的风险越小（这段绘制代码有 70 行，全改一遍
+        # 很容易漏一处，而漏掉的那一处就会在震动时「不跟着抖」，特别显眼）。
+        real = screen
+        ox, oy = self._shake_offset(t_ms)
+        if ox or oy:
+            screen = self._canvas_surface()
+
         screen.fill(BG)
         self.draw_backdrop(screen, t_ms)
         self.draw_battle_stage(screen, t_ms)
@@ -1434,6 +1731,10 @@ class BattleScene:
             screen.blit(ht, (WIDTH // 2 - ht.get_width() // 2,
                              HEIGHT - CARD_H - 92))
 
+        # ---------- 打击感：飘字 + 闪白（压在场景之上、弹窗之下） ----------
+        self.draw_pops(screen)
+        self.draw_overlays(screen)
+
         # ---------- 答题弹窗 ----------
         if self.quiz is not None:
             self.draw_quiz(screen, mouse, t_ms)
@@ -1441,6 +1742,13 @@ class BattleScene:
         # ---------- 结算画面 ----------
         if self.done:
             self.draw_result(screen)
+
+        # 震动：把画布整体偏移贴回真正的屏幕上。
+        # 先铺一层背景色 —— 画布偏移后边缘会露出上一帧的旧像素，
+        # 不盖掉的话会看到一条抖动的残影边。
+        if ox or oy:
+            real.fill(BG)
+            real.blit(screen, (ox, oy))
 
     def draw_card(self, screen, card, mouse):
         r = card.rect
