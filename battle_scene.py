@@ -568,11 +568,6 @@ class BattleScene:
         self.e_intent_val = 9
         # 平方主题层主的蓄力：0 = 没在蓄力。见 roll_intent / enemy_act。
         self.e_charge = 0
-        # 最近一次蓄下去的那个 n（蓄力时 = 待打出的基数，平方打击时 = 刚打出的基数）。
-        # 它存在的唯一理由是**让「n²」这份文案只有一个来源**：日志、飘字、
-        # 意图框三处都要写「4² = 16」，各自去读 SQUARE_BOSS_CHARGE 的话，
-        # 哪天给别的层主配一个「蓄力 5」，三处就会各说各话。
-        self.e_square_n = 0
         self.reward_gold = cfg["gold"]
 
         # ---- 回合 ----
@@ -1185,7 +1180,7 @@ class BattleScene:
             # 平方主题层主的杀招：这一下的伤害是**蓄力值的平方**。
             # 日志里把 n² 的算法摊开写 —— 玩家刚被 16 点打过，
             # 转头就在战利品里拿到「平方」这张牌，一眼就知道怎么用。
-            n = self.e_square_n
+            n = self._square_n()
             self._enemy_hit(self.e_intent_val,
                             "「平方」打击：%d² = %d，造成 %%d 点伤害" % (n, n * n))
         elif self.e_intent == "charge":
@@ -1246,6 +1241,16 @@ class BattleScene:
         else:
             self.e_intent = "buff"
 
+    def _square_n(self):
+        """「平方打击」这一下的基数 n。
+
+        伤害存的就是 n²，所以 n 由它**开方还原**，不另存字段。
+        另存过一次（`e_square_n`），结果被别的路径直接设 `e_intent`
+        绕过去，意图框上就出现了「平方 0²=16」这种自相矛盾的画面 ——
+        测试里一眼看到。n² 才是唯一的事实，谁想改都只能改那一处。
+        """
+        return int(math.isqrt(max(0, int(self.e_intent_val))))
+
     def _roll_square_boss_intent(self):
         """「正方体·三阶」的出招：蓄力 n，下回合打出 n²。
 
@@ -1255,14 +1260,12 @@ class BattleScene:
         """
         if self.e_charge <= 0:
             self.e_charge = SQUARE_BOSS_CHARGE
-            self.e_square_n = self.e_charge
             self.e_intent = "charge"
             self.e_intent_val = self.e_charge
         else:
             n = self.e_charge
             self.e_intent = "square"
             self.e_intent_val = n * n
-            self.e_square_n = n          # 供日志 / 飘字 / 意图框写「4² = 16」
             self.e_charge = 0
 
     # ==================== 选牌 / 组合 ====================
@@ -1749,7 +1752,7 @@ class BattleScene:
         写成一句「蓄力中」玩家就没法做决策了。
         """
         if self.e_intent == "square":
-            n = self.e_square_n
+            n = self._square_n()
             return "平方 %d²=%d" % (n, self.e_intent_val), RED, RED_SOFT
         if self.e_intent == "charge":
             return "蓄力 %d" % self.e_charge, PURPLE, PURPLE_SOFT

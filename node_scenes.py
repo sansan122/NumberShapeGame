@@ -1006,6 +1006,13 @@ class TreasurePanel(Panel):
 
 
 # ==================== 战利品（精英 / 层主战后）====================
+#: 「新卡到手」面板上那句提示。写成常量是因为**排版也要用它量行数**
+#: （见 _layout_unlock）：文案写在 draw 里，布局就只能靠猜。
+#: 这句话是整段设计的落点 —— 玩家刚被层主用 n² 打过两下，
+#: 这里告诉他那张牌是怎么来的、怎么用。
+UNLOCK_HINT = "层主就是用它打你的：蓄一个数，下回合打出那个数的平方。"
+
+
 class SpoilsPanel(Panel):
     """精英 / 层主倒下之后的战利品。
 
@@ -1065,8 +1072,11 @@ class SpoilsPanel(Panel):
 
         # ---- 布局（和宝箱面板同一套尺寸，看着像一家人）----
         self.result_rect = pygame.Rect(WIDTH // 2 - 300, 190, 600, 250)
-        self.btn_take = pygame.Rect(self.result_rect.centerx - 90,
-                                    self.result_rect.bottom - 62, 180, 46)
+        self.btn_relic = pygame.Rect(self.result_rect.centerx - 90,
+                                     self.result_rect.bottom - 62, 180, 46)
+        # 「新卡到手」那一段的框和按钮（_layout_unlock 会重算）
+        self.unlock_box = self.result_rect
+        self.btn_unlock = self.btn_relic
         self.card_rects = []
         self.cards = []
 
@@ -1075,11 +1085,57 @@ class SpoilsPanel(Panel):
         if self.unlock:
             self.stage = "unlock"
             self.msg = ""
+            self._layout_unlock()
         elif self.relic_name or self.relic_gold:
             self.stage = "relic"
             self.msg = ""
         else:
             self._enter_upgrade()
+
+    @property
+    def btn_take(self):
+        """当前阶段那个「收下 / 下一步」按钮。
+
+        做成属性而不是直接存字段：两个阶段的框不一样高，各存一个字段
+        就一定会有地方读错那一个 —— 症状是「按钮看得见、点了没反应」。
+        """
+        return self.btn_unlock if self.stage == "unlock" else self.btn_relic
+
+    def _layout_unlock(self):
+        """「新卡到手」的自适应排版。
+
+        锚点全部由**真实文字行数**推出来（wrapped_height），不写死 y：
+        写死过一次，说明文字被按钮压掉一半。规则是先把内容量算出来，
+        再决定框多高、按钮放哪 —— 文案以后加长也不会再压到一起。
+        """
+        name, ctype, value, desc, cost, effect = self.unlock
+        pad = 56                      # 左右留白
+        top = 88                      # 标题下方的起画位置
+        gap = 22                      # 说明与提示语之间的间距
+
+        box_w = 640
+        left = WIDTH // 2 - box_w // 2
+        tx = pad + CARD_W + 40        # 右栏起点（卡面右边 40px）
+        text_w = box_w - tx - pad
+
+        right_h = (self.F_BIG.get_height() + 18          # 卡名
+                   + wrapped_height(desc, self.F_SML, text_w)
+                   + gap
+                   + wrapped_height(UNLOCK_HINT, self.F_TINY, text_w))
+        body_h = max(CARD_H, right_h)
+        # 底部固定留出按钮 + 上下间隙，文字只能长到这儿
+        box_h = top + body_h + 96
+
+        self.unlock_box = pygame.Rect(left, 170, box_w, box_h)
+        self.unlock_desc_y = top + self.F_BIG.get_height() + 18
+        self.unlock_hint_y = self.unlock_desc_y + wrapped_height(
+            desc, self.F_SML, text_w) + gap
+        # 注意这里是 left + tx，不是 tx：tx 是「相对框左沿」的偏移，
+        # 直接当绝对坐标用会让文字整个跑到框外（试过，卡面和文字重叠）
+        self.unlock_text_x = left + tx
+        self.unlock_text_w = text_w
+        self.btn_unlock = pygame.Rect(self.unlock_box.centerx - 90,
+                                      self.unlock_box.bottom - 74, 180, 48)
 
     # ---------- 阶段流转 ----------
     def _after_unlock(self):
@@ -1146,8 +1202,9 @@ class SpoilsPanel(Panel):
 
         玩家刚被层主用 n² 打过两下，这里让他**看见**那张「平方」牌 ——
         牌面、说明、费用一应俱全，下一场战斗就知道该拿它配数字卡。
+        坐标全部取自 _layout_unlock 算好的锚点，这里不再写死 y。
         """
-        box = self.result_rect
+        box = self.unlock_box
         pygame.draw.rect(screen, PANEL, box, border_radius=16)
         pygame.draw.rect(screen, ACCENT, box, 3, border_radius=16)
 
@@ -1157,24 +1214,23 @@ class SpoilsPanel(Panel):
 
         # 卡面画在左边，说明写在右边
         card = Card(name, ctype, value, desc, cost, effect)
-        cr = pygame.Rect(box.x + 54, box.y + 84, CARD_W, CARD_H)
+        cr = pygame.Rect(box.x + 56, box.y + 88, CARD_W, CARD_H)
         draw_card_tile(screen, cr, card, False, self.F_SML, self.F_TINY)
 
-        tx = cr.right + 36
         nm = self.F_BIG.render(name, True, TEXT)
-        screen.blit(nm, (tx, box.y + 84))
+        screen.blit(nm, (self.unlock_text_x, box.y + 88))
         self.draw_wrapped(screen, desc, self.F_SML, TEXT_MUTE,
-                          tx, box.y + 128, box.right - tx - 40)
-        self.draw_wrapped(
-            screen,
-            "层主就是用它打你的：蓄一个数，下回合打出那个数的平方。",
-            self.F_TINY, TEXT_FAINT, tx, box.y + 178, box.right - tx - 40)
+                          self.unlock_text_x, box.y + self.unlock_desc_y,
+                          self.unlock_text_w)
+        self.draw_wrapped(screen, UNLOCK_HINT, self.F_TINY, TEXT_FAINT,
+                          self.unlock_text_x, box.y + self.unlock_hint_y,
+                          self.unlock_text_w)
 
-        hover = self.btn_take.collidepoint(mouse)
+        hover = self.btn_unlock.collidepoint(mouse)
         col = (20, 78, 135) if hover else ACCENT
-        pygame.draw.rect(screen, col, self.btn_take, border_radius=10)
+        pygame.draw.rect(screen, col, self.btn_unlock, border_radius=10)
         bt = self.F_MID.render("收下", True, (255, 255, 255))
-        screen.blit(bt, bt.get_rect(center=self.btn_take.center))
+        screen.blit(bt, bt.get_rect(center=self.btn_unlock.center))
 
     def draw_relic(self, screen, mouse):
         box = self.result_rect
@@ -1221,8 +1277,14 @@ class SpoilsPanel(Panel):
 
 
 # ==================== 通用文字折行 ====================
-def draw_wrapped(screen, text, font, color, x, y, max_w, center=False):
-    """把 text 按 max_w 折行画出来。返回末尾 y。"""
+def wrapped_lines(text, font, max_w):
+    """把 text 按 max_w 折成若干行。
+
+    单独抽出来是因为**布局也要知道会折几行** —— 从前只有 draw_wrapped
+    会折行，排版时只能靠「大概估一下写死 y」。结果「新卡到手」那段说明
+    被「收下」按钮压住了一半（截图里一眼可见）。现在框高和按钮位置都
+    由这里的真实行数推出来。
+    """
     lines = []
     cur = ""
     for ch in text:
@@ -1234,6 +1296,17 @@ def draw_wrapped(screen, text, font, color, x, y, max_w, center=False):
             cur = test
     if cur:
         lines.append(cur)
+    return lines
+
+
+def wrapped_height(text, font, max_w):
+    """这段文字折行之后占多高（含行距），和 draw_wrapped 的推进量一致。"""
+    return len(wrapped_lines(text, font, max_w)) * (font.get_height() + 3)
+
+
+def draw_wrapped(screen, text, font, color, x, y, max_w, center=False):
+    """把 text 按 max_w 折行画出来。返回末尾 y。"""
+    lines = wrapped_lines(text, font, max_w)
 
     cy = y
     for ln in lines:
