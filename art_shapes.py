@@ -62,6 +62,23 @@ def _line(screen, col, a, b, w):
     pygame.draw.circle(screen, col, (int(b[0]), int(b[1])), int(max(1, r)))
 
 
+def _arrow_head(screen, col, tip, ang, size):
+    """在 tip 处画一个指向 ang（弧度）的实心箭头。
+
+    统一在这里画，是为了让「反例 / 最简形式 / 定义域扩张」三处的箭头
+    长得一样 —— 各画各的三角形，三处的大小和张角立刻就不一致了
+    （卡牌图案那批就是靠共用一个 _line 才保持一致的）。
+    """
+    half = size * 0.5
+    back = ang + math.pi
+    base = (tip[0] + math.cos(back) * size, tip[1] + math.sin(back) * size)
+    left = (base[0] + math.cos(ang + math.pi / 2) * half,
+            base[1] + math.sin(ang + math.pi / 2) * half)
+    right = (base[0] + math.cos(ang - math.pi / 2) * half,
+             base[1] + math.sin(ang - math.pi / 2) * half)
+    pygame.draw.polygon(screen, col, [tip, left, right])
+
+
 # ---------------------------------------------------------------------------
 # 卡牌图案
 # ---------------------------------------------------------------------------
@@ -333,6 +350,258 @@ _ICONS = {
 #   这些卡，所以图案不能删；新牌面统一用 0~9。）
 for _d in "0123456789":
     _ICONS[_d] = _icon_digit(_d)
+
+
+# ---------------------------------------------------------------------------
+# 遗物图案
+# ---------------------------------------------------------------------------
+# 十件遗物各配一个几何图案，和卡牌图案同一套路（同一套 _line / _shade /
+# 兜底），理由也一样：遗物是**按名字结算**的（见 player.RELIC_POOL），
+# 图鉴里十件一次全列出来，一行行读文字去找「我拿到的是哪件」太费劲；
+# 给每件一个一眼能认的形，扫过去就找到了。
+#
+# 取名规矩是「名字本身就是这条效果的口诀」（player.RELIC_NAMING_RULE），
+# 图案就照着同一条口诀画：
+#     等比数列 -> 一块比一块高一倍的方块      反例   -> 箭头撞墙弹回
+#     守恒律   -> 两端等重的天平              复利   -> 越涨越陡的曲线
+#
+# ⚠️ 加遗物时**必须同时在这里补一个图案**。漏了不会报错，只会画出
+# 问号圆盘（不是留白，问号是故意的：一眼看得出"这件还没配图"）。
+# tmp/verify_relic_find.py 有一条断言拿 RELIC_POOL 和这张表对账。
+
+def draw_relic_icon(screen, name, center, size, col):
+    """按遗物名在 center 画一个 size×size 的图案。
+
+    size 是「可用方形边长」，内部一切按比例算 —— 所以同一个图案在
+    图鉴小卡（44）和宝箱面板（56）上形状完全一致，只是缩放不同。
+    返回 True 表示画了专属图案，False 表示走了兜底（问号圆盘）。
+    """
+    cx, cy = int(center[0]), int(center[1])
+    s = float(size)
+    drawer = RELIC_ICONS.get(name)
+    if drawer is None:
+        _icon_fallback(screen, cx, cy, s, col)
+        return False
+    drawer(screen, cx, cy, s, col)
+    return True
+
+
+def _ricon_gp(screen, cx, cy, s, col):
+    """等比数列 —— 1 : 2 : 4 三块，底边对齐，一块比一块高一倍。
+
+    「每答对一题伤害 +1」奖励的是接着答，而等比数列就是
+    「每往后一项都乘同一个数」的那个序列。
+    """
+    w = max(2, s * 0.055)
+    base = cy + s * 0.38
+    x = cx - s * 0.49
+    for i in range(3):
+        b = s * 0.13 * (2 ** i)
+        rr = pygame.Rect(int(x), int(base - b), int(b), int(b))
+        pygame.draw.rect(screen, _shade(col, 0.80 - i * 0.25), rr,
+                         border_radius=int(max(2, s * 0.03)))
+        pygame.draw.rect(screen, col, rr, int(w),
+                         border_radius=int(max(2, s * 0.03)))
+        x += b + s * 0.04
+
+
+def _ricon_counter(screen, cx, cy, s, col):
+    """反例 —— 一支箭头撞上竖墙、原路弹回去（挨打时反弹伤害）。"""
+    w = max(2, s * 0.07)
+    wall = cx + s * 0.30
+    _line(screen, col, (wall, cy - s * 0.40), (wall, cy + s * 0.40), w)
+    # 去程（淡一点）：从左下斜上来撞墙
+    _line(screen, _shade(col, 0.35),
+          (cx - s * 0.44, cy + s * 0.28), (wall, cy), max(2, s * 0.065))
+    # 回程：撞完往回走，箭头指着「回去」的方向
+    back = (cx - s * 0.36, cy - s * 0.30)
+    _line(screen, col, (wall, cy), back, max(2, s * 0.075))
+    _arrow_head(screen, col, back,
+                math.atan2(back[1] - cy, back[0] - wall), s * 0.20)
+
+
+def _ricon_isoperimetric(screen, cx, cy, s, col):
+    """等周不等式 —— 同样周长围一圈，圆包住的面积最大：
+    圆里内接一个正方（"另一种围法"，看得到它比圆小）。
+
+    对应效果：本回合出过数字卡后，图形卡额外 +4 格挡。
+    """
+    r = s * 0.44
+    d = r / math.sqrt(2.0)
+    rr = pygame.Rect(int(cx - d), int(cy - d), int(d * 2), int(d * 2))
+    pygame.draw.rect(screen, _shade(col, 0.30), rr, max(2, int(s * 0.05)),
+                     border_radius=int(max(2, s * 0.04)))
+    pygame.draw.circle(screen, col, (cx, cy), int(r), max(2, int(s * 0.085)))
+
+
+def _ricon_simplest(screen, cx, cy, s, col):
+    """最简形式 —— 并排的两块经过化简只剩一块（能省的就省掉）。
+
+    对应效果：战斗开始时，牌库里最弱的那张被舍去。
+    """
+    w = max(2, s * 0.06)
+    b = s * 0.10
+    for i in range(2):
+        rr = pygame.Rect(0, 0, int(b * 2), int(b * 2))
+        rr.center = (int(cx - s * 0.36 + i * (b * 2 + s * 0.04)), int(cy))
+        pygame.draw.rect(screen, _shade(col, 0.74), rr,
+                         border_radius=int(max(2, s * 0.03)))
+        pygame.draw.rect(screen, _shade(col, 0.25), rr, int(w),
+                         border_radius=int(max(2, s * 0.03)))
+    # 化简的箭头
+    _line(screen, col, (cx + s * 0.04, cy), (cx + s * 0.22, cy),
+          max(2, s * 0.065))
+    _arrow_head(screen, col, (cx + s * 0.28, cy), 0.0, s * 0.16)
+    # 化简之后的那一块（实心、更醒目）
+    rr = pygame.Rect(0, 0, int(b * 2.4), int(b * 2.4))
+    rr.center = (int(cx + s * 0.36), int(cy))
+    pygame.draw.rect(screen, _shade(col, 0.82), rr,
+                     border_radius=int(max(2, s * 0.03)))
+    pygame.draw.rect(screen, col, rr, int(w),
+                     border_radius=int(max(2, s * 0.03)))
+
+
+def _ricon_conservation(screen, cx, cy, s, col):
+    """守恒律 —— 一架两端等重的天平（掉下去的会在另一头补回来）。
+
+    对应效果：每场战斗开始时回 4 点生命。
+    """
+    w = max(2, s * 0.065)
+    beam = cy - s * 0.26
+    _line(screen, col, (cx - s * 0.44, beam), (cx + s * 0.44, beam),
+          max(2, s * 0.07))
+    # 立柱 + 底座
+    _line(screen, col, (cx, beam), (cx, cy + s * 0.36), w)
+    _line(screen, col, (cx - s * 0.20, cy + s * 0.36),
+          (cx + s * 0.20, cy + s * 0.36), max(2, s * 0.07))
+    # 两端的托盘（一样高 = 平衡）
+    for sx in (-1, 1):
+        hx = cx + sx * s * 0.36
+        _line(screen, _shade(col, 0.35), (hx, beam), (hx, beam + s * 0.16),
+              max(1, int(s * 0.035)))
+        d = s * 0.13
+        rr = pygame.Rect(int(hx - d), int(beam + s * 0.16),
+                         int(d * 2), int(s * 0.11))
+        pygame.draw.rect(screen, _shade(col, 0.80), rr,
+                         border_radius=int(max(2, s * 0.03)))
+        pygame.draw.rect(screen, col, rr, max(2, int(s * 0.045)),
+                         border_radius=int(max(2, s * 0.03)))
+
+
+def _ricon_permutation(screen, cx, cy, s, col):
+    """排列组合 —— 3×3 的点阵，其中一条对角线被连起来
+    （从"都摆在那儿"到"选出这一组"）。
+
+    对应效果：每回合多抽 1 张牌（手里的可能性多一种）。
+    """
+    gap = s * 0.27
+    dot = int(max(2, s * 0.062))
+    # 先连线、后画点：接点才干净（点盖在线的端头上）
+    _line(screen, col, (cx - gap, cy - gap), (cx + gap, cy + gap),
+          max(2, s * 0.075))
+    for i in range(-1, 2):
+        for j in range(-1, 2):
+            on = (i == j)
+            c = col if on else _shade(col, 0.58)
+            pygame.draw.circle(screen, c,
+                               (int(cx + i * gap), int(cy + j * gap)),
+                               dot + (1 if on else 0))
+
+
+def _ricon_domain(screen, cx, cy, s, col):
+    """定义域扩张 —— 实心的小圆（原来的定义域）外套一圈虚线大圆，
+    四个斜角还探出小箭头（范围在往外长）。
+
+    对应效果：最大生命 +12 —— 装得下的更多了。
+    """
+    r0, r1 = s * 0.21, s * 0.38
+    pygame.draw.circle(screen, _shade(col, 0.78), (cx, cy), int(r0))
+    pygame.draw.circle(screen, col, (cx, cy), int(r0), max(2, int(s * 0.065)))
+    _dashed_circle(screen, _shade(col, 0.30), (cx, cy), r1, s * 0.07)
+    for k in range(4):
+        a = math.pi / 4 + k * math.pi / 2
+        tip = (cx + math.cos(a) * (r1 + s * 0.12),
+               cy + math.sin(a) * (r1 + s * 0.12))
+        _arrow_head(screen, col, tip, a, s * 0.13)
+
+
+def _ricon_tolerance(screen, cx, cy, s, col):
+    """容错区间 —— 数轴上的一个区间，区间里那个点偏了一点也算数。
+
+    对应效果：每回合第一次算错，卡牌不消耗。
+    """
+    w = max(2, s * 0.06)
+    ay = cy + s * 0.24
+    _line(screen, _shade(col, 0.40), (cx - s * 0.46, ay), (cx + s * 0.46, ay),
+          max(1, int(s * 0.04)))
+    lx, rx, top = cx - s * 0.24, cx + s * 0.24, cy - s * 0.22
+    pygame.draw.lines(screen, col, False,
+                      [(int(lx), int(ay)), (int(lx), int(top)),
+                       (int(rx), int(top)), (int(rx), int(ay))], int(w))
+    # 偏右的那个点：容错区间里的「差一点也算」
+    pygame.draw.circle(screen, col, (int(cx + s * 0.12), int(ay)),
+                       int(max(2, s * 0.075)))
+
+
+def _ricon_reduce(screen, cx, cy, s, col):
+    """约分 —— 分数线上下各两个小块，一条斜杠把公因子划掉。
+
+    对应效果：商店删牌价格降低 30%（价格也被「约」掉了）。
+    """
+    w = max(2, s * 0.055)
+    b = s * 0.085
+    _line(screen, col, (cx - s * 0.30, cy), (cx + s * 0.30, cy),
+          max(2, s * 0.07))
+    for dy in (-1, 1):
+        for dx in (-1, 1):
+            rr = pygame.Rect(0, 0, int(b * 2), int(b * 2))
+            rr.center = (int(cx + dx * s * 0.16), int(cy + dy * s * 0.24))
+            pygame.draw.rect(screen, _shade(col, 0.72), rr,
+                             border_radius=int(max(2, s * 0.025)))
+            pygame.draw.rect(screen, _shade(col, 0.30), rr, int(w),
+                             border_radius=int(max(2, s * 0.025)))
+    # 划掉公因子的那一笔
+    _line(screen, col, (cx - s * 0.36, cy + s * 0.40),
+          (cx + s * 0.36, cy - s * 0.40), max(2, s * 0.075))
+
+
+def _ricon_compound(screen, cx, cy, s, col):
+    """复利 —— 一条越涨越陡的曲线，末端滚成一个大球（利滚利）。
+
+    对应效果：战斗胜利的金币奖励 +50%。
+    """
+    n = 7
+    x0, x1 = cx - s * 0.40, cx + s * 0.26
+    y0, y1 = cy + s * 0.34, cy - s * 0.34
+    pts = [(int(x0 + (x1 - x0) * (i / (n - 1.0))),
+            int(y0 + (y1 - y0) * ((i / (n - 1.0)) ** 2.1))) for i in range(n)]
+    pygame.draw.lines(screen, col, False, pts, max(2, int(s * 0.08)))
+    pygame.draw.circle(screen, col, (int(x0), int(y0)), int(max(2, s * 0.055)))
+    ball = (int(x1 + s * 0.06), int(y1))
+    r = int(max(3, s * 0.15))
+    pygame.draw.circle(screen, _shade(col, 0.80), ball, r)
+    pygame.draw.circle(screen, col, ball, r, max(2, int(s * 0.055)))
+
+
+# 遗物名 -> 图案。名字和 player.RELIC_POOL 一一对应，
+# 漏配的会被 draw_relic_icon 画成问号圆盘（见上面那段注释）。
+RELIC_ICONS = {
+    "等比数列":   _ricon_gp,
+    "反例":       _ricon_counter,
+    "等周不等式": _ricon_isoperimetric,
+    "最简形式":   _ricon_simplest,
+    "守恒律":     _ricon_conservation,
+    "排列组合":   _ricon_permutation,
+    "定义域扩张": _ricon_domain,
+    "容错区间":   _ricon_tolerance,
+    "约分":       _ricon_reduce,
+    "复利":       _ricon_compound,
+}
+
+
+def has_relic_icon(name):
+    """这件遗物配了专属图案吗（给测试用：漏配一件就红）。"""
+    return name in RELIC_ICONS
 
 
 # ---------------------------------------------------------------------------

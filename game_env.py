@@ -198,34 +198,150 @@ def fonts(sizes):
 # 三、通用文字折行
 # ---------------------------------------------------------------------------
 
+#: 折行时**不可拆开**的字符：西文、数字，以及紧跟着它们的符号。
+#: 为什么要有这个：中文逐字折行会把「30%」拆成「30」+「%」、
+#: 把「+50%」拆成「+」+「50%」—— 一行一个孤零零的符号非常难看。
+#: 这个坑是给遗物图鉴加图案、文字列变窄之后才露出来的。
+_GLUE_CHARS = set("0123456789"
+                  "abcdefghijklmnopqrstuvwxyz"
+                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  "%+-./×÷²³")
+
+#: 不该出现在**行首**的收尾标点（中文的「行首禁则」）。
+#: 放不下时宁可让上一行稍稍超宽，也不能让句号、右括号、空格顶到下一行开头。
+_NO_LINE_START = set("，。、；：！？）】》」』…·% ")
+
+#: 不该落在**行末**的开括号 —— 它得跟后面的内容一起走，
+#: 否则会折出「（」独占一行、内容全在下一行这种断法。
+_NO_LINE_END = set("（【《「『")
+
+#: 断行的优先位置：这些标点**之后**是句子里最自然的分界。
+#: 中文没有空格，逐字折行会把「伤害」「反弹」这种词从中间劈开 ——
+#: 有逗号可用时优先断在逗号后，读起来才像话。
+_BREAK_AFTER = set("，。；：！？、")
+
+
+def _wrap_chunks(text):
+    """把一句话切成「不可拆的块」：西文/数字连串算一块，其余一字一块。"""
+    out, cur = [], ""
+    for ch in text:
+        if ch in _GLUE_CHARS:
+            cur += ch
+        else:
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(ch)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _break_points(cur):
+    """这一行所有**可以断**的位置，按「该优先用哪个」排好序。
+
+    优先级从强到弱：
+
+      1. **开括号处** —— 「（最多 +3）」整体挪到下一行，
+         不会出现「（」吊在行尾、内容跑下一行；
+      2. **收尾标点之后** —— 中文没有空格，逐字折行会把「伤害」
+         「反弹」这种词从中间劈开；有逗号可用时断在逗号后最像话；
+      3. **空格之后** —— 最弱的一档（「…多抽 1 张牌」断在空格后，
+         把「1 张牌」整个挪下去）。
+
+    返回的是**一串**候选而不是一个：最靠右那个未必搬得动
+    （下一行可能装不下），这时得退回去试更靠左的断点
+    （「每场战斗开始时，恢复 4 点生命」就得一路退到逗号后）。
+    """
+    cand = []
+    for c in _NO_LINE_END:
+        j = cur.rfind(c)
+        if j > 0:
+            cand.append((0, j))
+    for c in _BREAK_AFTER:
+        j = cur.rfind(c)
+        if j >= 0:
+            cand.append((1, j + 1))
+    for j, ch in enumerate(cur):
+        if ch == " " and j > 0:
+            cand.append((2, j + 1))
+    # 同级里靠右的优先；同一个位置只留一次
+    return [p for _, p in sorted(set(cand), key=lambda t: (t[0], -t[1]))]
+
+
 def wrap_text(font, text, max_w):
-    """把 text 按像素宽度折成若干行（中文逐字折行就够，不必按词断）。
+    """把 text 按像素宽度折成若干行。
 
     放在这里是因为**三处都要用**：牌组面板、节点面板、地图的遗物图鉴。
     这份逻辑原先抄了三遍（deck_view.wrap_text / node_scenes.wrapped_lines /
     地图里再写一份），改一次行距要翻三个文件 —— 本项目已经因为
     「同一件事写两处」栽过好几次（见 README 踩坑），所以收口到这里。
 
+    折行单位是「块」而不是单个字（见 _wrap_chunks）：中文可以逐字断，
+    但「30%」「+50%」「n²」这种西文数字串必须整体挪到下一行，
+    不然会折出「…降低 30」+「%」这种只有半个符号的行。
+    此外收尾标点不落行首（_NO_LINE_START），断行优先断在标点后、
+    开括号前（见 _break_point）。
+
     `\n` 是硬换行（说明文案里写死断行的地方靠它）。
 
     单个字就超宽时也硬放一行 —— 老版本会先 append 一个空串，
     折出来的第一行是空行，排版算高度就会莫名多出一行。
     """
-    lines, cur = [], ""
-    for ch in text:
-        if ch == "\n":
+    lines = []
+    for para in text.split("\n"):
+        cur = ""
+        for blk in _wrap_chunks(para):
+            if not cur:
+                cur = blk
+            elif (font.size(cur + blk)[0] <= max_w
+                  or blk in _NO_LINE_START):
+                # 放得下就接着排；放不下但它是收尾标点，也黏在句尾 ——
+                # 标点孤零零跑到下一行开头比这一行宽几个像素更难看
+                cur += blk
+            else:
+                lines.append(cur)
+                cur = blk
+        if cur:
             lines.append(cur)
-            cur = ""
-            continue
-        if font.size(cur + ch)[0] <= max_w:
-            cur += ch
-        elif cur:
-            lines.append(cur)
-            cur = ch
-        else:
-            cur = ch          # 一个字就超宽：让它自己占一行，别死循环
-    if cur:
-        lines.append(cur)
+        elif not para:
+            lines.append("")      # 空段落留成空行（和旧行为一致）
+    return _align_breaks(font, lines, max_w)
+
+
+def _align_breaks(font, lines, max_w):
+    """把折好的行再对齐一次：能挪到下一行开头的内容就挪过去。
+
+    为什么不能在折行时一次做对：流式折行只看得到「当前这一行放不下了」，
+    看不到「下一行会剩多少」。中文没有空格，于是逐字断会把「伤害」
+    「反弹」从中间劈开；改成"一放不下就断在标点后"又会把下一行塞爆、
+    平白多出一行（「战斗开始时，牌库里最弱的一张被舍去」会变成三行）。
+
+    所以先老老实实按宽度折，再回头做对齐：把某一行里最后一个可断点
+    之后的内容挪到下一行开头 —— **挪完下一行仍装得下才挪**。
+    这样既断在自然处，又不会多出行数。
+    """
+    for _ in range(4):            # 挪动只往后走，几轮就稳；给个上限防意外
+        moved = False
+        for i in range(len(lines) - 1):
+            a, b = lines[i], lines[i + 1]
+            if not a or not b:
+                continue
+            for p in _break_points(a):
+                if p >= len(a):
+                    continue          # 断点在行尾 = 等于没断
+                if font.size(a[:p])[0] < max_w * 0.5:
+                    # 断点太靠左：上一行会只剩小半行、后面留一大片空白
+                    # （「最大生命 +12，并回复等量生命」就会变成
+                    #   「最大生命」+「+12，并回复等量生命」）
+                    continue
+                nxt = a[p:] + b
+                if font.size(nxt)[0] <= max_w:
+                    lines[i], lines[i + 1] = a[:p], nxt
+                    moved = True
+                    break
+        if not moved:
+            break
     return lines
 
 

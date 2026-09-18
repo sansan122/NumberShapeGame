@@ -26,6 +26,7 @@ import random
 
 import pygame
 
+import art_shapes
 import game_env as E
 import sfx
 # 遗物池放在 player.py —— 地图的路线代价也要发遗物，
@@ -963,6 +964,7 @@ class TreasurePanel(Panel):
         self.msg = ""
 
     def draw_body(self, screen, mouse, t):
+        """未打开时画箱子；打开后画结果卡（遗物名 + 图案 + 收下按钮）。"""
         if not self.opened:
             hover = self.box_rect.inflate(80, 60).collidepoint(mouse)
             bob = math.sin(t / 400.0) * 5
@@ -993,7 +995,20 @@ class TreasurePanel(Panel):
             screen.blit(tt, tt.get_rect(center=(box.centerx, box.y + 48)))
 
             nm = self.F_BIG.render(self.relic_name, True, TEXT)
-            screen.blit(nm, nm.get_rect(center=(box.centerx, box.y + 104)))
+            if art_shapes.has_relic_icon(self.relic_name):
+                # 名字左边配上图案，整组水平居中 —— 拿到手这一刻先看到的
+                # 是形，然后是名字（图鉴里也是这么对应的）。
+                # 只在真拿到遗物时画：集齐折现那一路的名字是「遗物已集齐」，
+                # 拿它去查图案只会画出问号圆盘。
+                ico, gap = 56, 14
+                left = box.centerx - (ico + gap + nm.get_width()) // 2
+                art_shapes.draw_relic_icon(screen, self.relic_name,
+                                           (left + ico // 2, box.y + 104),
+                                           ico, PURPLE)
+                screen.blit(nm, (left + ico + gap,
+                                 box.y + 104 - nm.get_height() // 2))
+            else:
+                screen.blit(nm, nm.get_rect(center=(box.centerx, box.y + 104)))
 
             self.draw_wrapped(screen, self.relic_desc, self.F_SML, TEXT_MUTE,
                               box.x + 40, box.y + 140, box.w - 80, center=True)
@@ -1233,6 +1248,7 @@ class SpoilsPanel(Panel):
         screen.blit(bt, bt.get_rect(center=self.btn_unlock.center))
 
     def draw_relic(self, screen, mouse):
+        """战利品第一页：遗物（图案 + 名字 + 效果文案）+「收下」。"""
         box = self.result_rect
         pygame.draw.rect(screen, PANEL, box, border_radius=16)
         pygame.draw.rect(screen, PURPLE, box, 3, border_radius=16)
@@ -1242,7 +1258,17 @@ class SpoilsPanel(Panel):
 
         if self.relic_name:
             nm = self.F_BIG.render(self.relic_name, True, TEXT)
-            screen.blit(nm, nm.get_rect(center=(box.centerx, box.y + 94)))
+            if art_shapes.has_relic_icon(self.relic_name):
+                # 和宝箱那一路一样：图案 + 名字整组居中（见 TreasurePanel）
+                ico, gap = 56, 14
+                left = box.centerx - (ico + gap + nm.get_width()) // 2
+                art_shapes.draw_relic_icon(screen, self.relic_name,
+                                           (left + ico // 2, box.y + 94),
+                                           ico, PURPLE)
+                screen.blit(nm, (left + ico + gap,
+                                 box.y + 94 - nm.get_height() // 2))
+            else:
+                screen.blit(nm, nm.get_rect(center=(box.centerx, box.y + 94)))
             self.draw_wrapped(screen, self.relic_desc, self.F_SML, TEXT_MUTE,
                               box.x + 40, box.y + 128, box.w - 80, center=True)
         else:

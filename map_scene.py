@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pygame
 
+import art_shapes
 import char_art
 import game_env as E
 import player as P      # 路线代价要发遗物，用 P.roll_unowned_relic
@@ -70,6 +71,9 @@ TYPE_COLOR = {
 # 玩家看到紫色就知道和遗物有关。
 RELIC_COL  = (83, 74, 183)
 RELIC_SOFT = (238, 236, 252)
+#: 没到手的遗物：图案跟着一起变这一档灰。比卡片底色深一档 ——
+#: 再淡就只剩个影子，"是什么形状"反而看不出来了。
+RELIC_DIM  = (182, 180, 192)
 
 #: 哪些节点会出遗物 —— 用于 ① 节点角标 ②「查找遗物」高亮 ③ 悬停提示。
 #: 值 = (短标签, 说明)。
@@ -857,8 +861,16 @@ class MapScene:
                          border_radius=7)
         pygame.draw.rect(screen, RELIC_COL if hv else PANEL_LINE, btn,
                          1, border_radius=7)
+        # 按钮左边放一张小图案（最近到手的那件）—— 这按钮就是「遗物入口」，
+        # 给个形比光写一个数字好认；一件都没有就留个空框，别空着一块
+        icon_box = self.relic_button_icon_rect(lay)
+        if self.relics:
+            art_shapes.draw_relic_icon(screen, self.relics[-1],
+                                       icon_box.center, 19, RELIC_COL)
+        else:
+            pygame.draw.rect(screen, PANEL_LINE, icon_box, 1, border_radius=4)
         rt = self.F_SML.render("遗物 %d 件" % len(self.relics), True, RELIC_COL)
-        screen.blit(rt, (btn.x + 8, btn.y + 5))
+        screen.blit(rt, (icon_box.right + 5, btn.y + 5))
         ft = self.F_TINY.render("查看 ›", True, RELIC_COL if hv else TEXT_FAINT)
         screen.blit(ft, (btn.right - ft.get_width() - 8, btn.y + 7))
 
@@ -892,6 +904,16 @@ class MapScene:
         tip = "滚轮 / ↑↓ 滚动视角　·　点击高亮节点移动　·　ESC 返回"
         tt = self.F_SML.render(tip, True, TEXT_MUTE)
         screen.blit(tt, (24, HEIGHT - 30))
+
+    def relic_button_icon_rect(self, lay=None):
+        """「遗物 N 件」按钮左边那个小图案的位置。
+
+        单独抽出来是为了让**画和断言用同一份坐标** —— 按钮宽度、内边距
+        一改，测试里手抄的那份就会悄悄过期（这个项目在"两处各推一套
+        坐标"上栽过好几次，见 README 踩坑）。
+        """
+        btn = (lay or self.panel_layout())["btn_relics"]
+        return pygame.Rect(btn.x + 6, btn.centery - 10, 20, 20)
 
     def tooltip_lines(self, n):
         """悬停提示要显示哪几行 —— (文字, 颜色, 字体) 的列表。
@@ -979,6 +1001,10 @@ class RelicPanel:
     写死的那套尺寸算出 928 高，最后一行整个掉出 720 的屏幕下沿（还点不到）。
     现在池子再怎么涨，也只是卡片变矮，面板**永远留在屏幕里**。
 
+    每件遗物还配了一个几何图案（art_shapes.RELIC_ICONS）：十件全靠读文字
+    找"我拿到的是哪件"太累，图案扫一眼就认出来了 —— 没到手的那张连图案
+    一起变灰，形状的颜色就是"有没有"。
+
     接口跟其它覆盖层一致：handle() / draw()，宿主负责在它开着的时候
     优先把事件喂过来（见 MapScene.handle_relic_panel）。
     """
@@ -988,6 +1014,8 @@ class RelicPanel:
     TILE_W, TILE_H, GAP = 236, 146, 18
     #: 面板里卡片区上下要留掉的固定高度：标题那一行 + 底部「来源 / 关闭」
     TOP_PAD, BOTTOM_PAD = 78, 96
+    #: 卡片内左侧留给图案那一列的宽度（图案 + 左右边距）
+    ICON_SIZE, ICON_COL = 44, 70
 
     def __init__(self, owned):
         self.owned = set(owned)
@@ -1045,6 +1073,32 @@ class RelicPanel:
                 return "close"
         return None
 
+    def tile_layout(self, r):
+        """一张卡片里的元素怎么摆 —— **画和断言共用这一份**。
+
+        这个项目在「布局一处写死、别处再推一遍」上栽过（牌组面板算高度
+        和真摆卡片用了两套坐标，最后一行掉出屏幕还点不到），所以这里连
+        测试也直接来读这几个矩形，不自己重算一遍。
+
+        左边一列是图案 + 图案正下方的「已获得 / 未获得」小标签，
+        右边才是名字和效果文案 —— 竖着堆（图案在上、名字在下）
+        在卡片压到最矮（104）时会把效果文案顶出卡片。
+        """
+        icon = pygame.Rect(r.x + 14, r.y + 18, self.ICON_SIZE, self.ICON_SIZE)
+        tag_w = max(self.F_TINY.size("已获得")[0],
+                    self.F_TINY.size("未获得")[0]) + 16
+        tag = pygame.Rect(0, 0, tag_w, self.F_TINY.get_height() + 6)
+        tag.midtop = (icon.centerx, icon.bottom + 6)
+
+        tx = r.x + self.ICON_COL
+        return {
+            "icon": icon,
+            "tag": tag,
+            "name": (tx, r.y + 16),
+            "desc": (tx, r.y + 50),
+            "desc_w": r.right - 14 - tx,
+        }
+
     # ---------- 绘制 ----------
     def draw(self, screen, mouse):
         # 背后压一层暗纱：地图还在，但不抢眼
@@ -1085,9 +1139,14 @@ class RelicPanel:
         screen.blit(bt, bt.get_rect(center=self.btn_close.center))
 
     def _draw_tile(self, screen, mouse, item, r, has):
-        """一张遗物卡：名字 + 效果 + 到手了没有。"""
+        """一张遗物卡：图案 + 名字 + 效果 + 到手了没有。
+
+        没到手的那张，图案也跟着变灰（不只是文字变灰）—— 一眼扫过去
+        先看到的形状，形状的颜色就是"有没有"。
+        """
         name, desc = item
         hv = r.collidepoint(mouse)
+        lay = self.tile_layout(r)
 
         if has:
             pygame.draw.rect(screen, PANEL, r, border_radius=10)
@@ -1098,24 +1157,30 @@ class RelicPanel:
             pygame.draw.rect(screen, (219, 217, 209) if hv else (230, 228, 220),
                              r, 1, border_radius=10)
 
-        # 状态角标（右上角）
+        # 图案（主，左边一列）
+        art_shapes.draw_relic_icon(screen, name, lay["icon"].center,
+                                   self.ICON_SIZE,
+                                   RELIC_COL if has else RELIC_DIM)
+
+        # 状态小标签：贴在图案正下方（右上角要留给名字，别去挤）
         tag = "已获得" if has else "未获得"
-        tag_bg = RELIC_COL if has else (206, 204, 197)
+        tbox = lay["tag"]
+        pygame.draw.rect(screen, RELIC_COL if has else (206, 204, 197), tbox,
+                         border_radius=7)
         tt = self.F_TINY.render(tag, True, (255, 255, 255))
-        tbox = pygame.Rect(0, 0, tt.get_width() + 16, tt.get_height() + 6)
-        tbox.topright = (r.right - 12, r.y + 12)
-        pygame.draw.rect(screen, tag_bg, tbox, border_radius=7)
         screen.blit(tt, tt.get_rect(center=tbox.center))
 
+        nx, ny = lay["name"]
         nm = self.F_TITLE.render(name, True, TEXT if has else TEXT_FAINT)
-        screen.blit(nm, (r.x + 14, r.y + 14))
+        screen.blit(nm, (nx, ny))
 
         # 效果文案：按真实行数往下排（别写死 y —— 文案一改就会被压住，
         # 上一轮「新卡到手」就是这么被按钮盖掉半行的）
-        cy = r.y + 52
-        for ln in E.wrap_text(self.F_SML, desc, r.w - 28):
+        dx, dy = lay["desc"]
+        cy = dy
+        for ln in E.wrap_text(self.F_SML, desc, lay["desc_w"]):
             screen.blit(self.F_SML.render(
-                ln, True, TEXT_MUTE if has else TEXT_FAINT), (r.x + 14, cy))
+                ln, True, TEXT_MUTE if has else TEXT_FAINT), (dx, cy))
             cy += self.F_SML.get_height() + 3
 
 
