@@ -25,6 +25,7 @@ import pygame
 
 import char_art
 import game_env as E
+import player as P      # 路线代价要发遗物，用 P.roll_unowned_relic
 
 # 打包成 exe 后 __file__ 指向临时解包目录，所以一律用 game_env 算路径
 ROOT = E.resource_path()
@@ -281,7 +282,13 @@ class MapScene:
         return True
 
     def apply_cost(self, cost):
-        """结算一个路线代价。"""
+        """结算一个路线代价。
+
+        代价都是「一罚一奖」成对设计的，两边**都要**落地。
+        以前 liability 只加了敌人血量、open_interval 只锁了精英，
+        承诺的那半句（遗物 / 战后额外强化）一句都没实现，
+        玩家等于白亏 —— 别再只写罚的那一半。
+        """
         cid = cost["id"]
         self.push_log("代价「%s」：%s" % (cost["name"], cost["desc"]))
         if cid == "approximate":
@@ -290,12 +297,32 @@ class MapScene:
         elif cid == "liability":
             self.enemy_hp_mult *= 1.15
             self.push_log("本层敌人生命 +15%")
+            self._grant_cost_reward()
         elif cid == "unproven":
             self.hide_next = True
             self.push_log("下一层节点类型不可见")
         elif cid == "open_interval":
             self.force_elite_next = True
             self.push_log("下一个节点必为精英")
+            # 「战后额外获得 1 次强化」先挂在玩家身上，
+            # 打赢下一场由战利品面板（main.open_spoils）兑现
+            if self.player:
+                self.player.pending_upgrades += 1
+                self.push_log("战后额外强化 1 次")
+
+    def _grant_cost_reward(self):
+        """「负债增量」奖励的那一半：获得 1 件随机遗物（集齐了折现金币）。"""
+        if not self.player:
+            return
+        got = P.roll_unowned_relic(self.player)
+        if got:
+            note = self.player.add_relic(got[0])
+            self.push_log("获得遗物「%s」：%s" % (got[0], got[1]))
+            if note:
+                self.push_log(note)
+        else:
+            self.player.gold += 40
+            self.push_log("遗物已集齐，折现 +40 金币")
 
     # ==================== 相机 ====================
     def camera_for(self, node, anchor=0.62):

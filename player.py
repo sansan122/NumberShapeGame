@@ -60,7 +60,7 @@ STARTER_DECK = [
 #   theme     核心机制一句话，用来做「新手提示」
 #   desc      面板里的详细介绍
 #   deck      初始牌组（覆盖 STARTER_DECK）；None 表示用默认
-#   trait     被动（先记录设计，实装留到后面）
+#   trait     被动 —— 文案显示在选角界面，效果在 battle_scene 里按 char_id 结算
 CHARACTERS = [
     {
         "id": "calculator",
@@ -126,7 +126,7 @@ CHARACTERS = [
             ("归零",   "shape",  0, "清空敌人格挡",  1, {"strip": True}),
             ("未知数", "number", 6, "造成 6 点伤害", 1, {"dmg": 6}),
         ],
-        "trait": "【代入】每回合抽牌阶段多抽 1 张，但手牌上限仍是 5",
+        "trait": "【代入】每回合抽牌阶段多抽 1 张",
     },
 ]
 
@@ -137,6 +137,33 @@ def character_by_id(cid):
         if c["id"] == cid:
             return c
     return CHARACTERS[0]
+
+
+# ==================== 遗物池 ====================
+#: (名字, 描述)。效果按名字结算，散在用到的地方：
+#:   勾股定理 / 质数筛 / 换元法 / 对数尺 / 约等号  -> battle_scene
+#:   公理石                                      -> Player.add_relic
+RELIC_POOL = [
+    ("勾股定理", "每回合首次打出图形卡，额外获得 3 点格挡"),
+    ("质数筛",   "战斗开始时，从牌库移除 1 张最弱的卡"),
+    ("换元法",   "每回合第一次算错不消耗卡牌"),
+    ("对数尺",   "每回合多抽 1 张牌"),
+    ("约等号",   "所有『造成伤害』的卡 +1 伤害"),
+    ("公理石",   "最大生命 +12"),
+]
+
+
+def roll_unowned_relic(player, rng=random):
+    """抽一件玩家还没有的遗物；全拿完了返回 None（由调用方折现成金币）。
+
+    必须去重 —— 否则「遗物 3 件」里可能躺着两件勾股定理，
+    效果却只按名字算一份，玩家会觉得白白亏了一件。
+    """
+    owned = set(player.relics)
+    pool = [r for r in RELIC_POOL if r[0] not in owned]
+    if not pool:
+        return None
+    return rng.choice(pool)
 
 
 class Player:
@@ -157,6 +184,9 @@ class Player:
         self.hp = max_hp
         self.gold = gold
         self.relics = []
+        # 挂起的强化次数：路线代价「开区间」承诺「战后额外获得 1 次强化」，
+        # 先记在这里，等下一场战斗打赢了由战利品面板兑现。
+        self.pending_upgrades = 0
         self.deck = [Card(*c) for c in deck_src]
         self.log_lines = []
 
@@ -184,7 +214,16 @@ class Player:
 
     # ---------- 遗物 ----------
     def add_relic(self, name):
+        """收下一件遗物。有些遗物是「拿到就生效」的，在这里一次结算掉 ——
+        以前这里只是 append，导致「公理石」写在遗物池里却完全没用。
+        返回一句话说明，供上层写日志。"""
         self.relics.append(name)
+        if name == "公理石":
+            # 最大生命 +12，当前生命同时 +12（不然白得多出来的上限血量）
+            self.max_hp += 12
+            self.hp = min(self.max_hp, self.hp + 12)
+            return "最大生命 +12"
+        return ""
 
     def has_relic(self, name):
         return name in self.relics
@@ -216,6 +255,7 @@ class Player:
             "hp": self.hp,
             "gold": self.gold,
             "relics": list(self.relics),
+            "pending_upgrades": self.pending_upgrades,
             "deck": [{"name": c.name, "ctype": c.ctype, "value": c.value,
                       "desc": c.desc, "cost": c.cost, "effect": dict(c.effect)}
                      for c in self.deck],

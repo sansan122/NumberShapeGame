@@ -130,26 +130,48 @@ CARD_W, CARD_H = 132, 176
 
 
 # ==================== 敌人配置 ====================
+# relic / upgrade：打完这一档敌人之后，战利品面板发几件遗物、送几次强化。
+# 精英那行是兑现 tower.yaml 里写的「阶段化敌人，掉落遗物」——
+# 以前这里只有 gold，遗物和强化一句都没落地，玩家打完精英两手空空。
 ENEMY_KINDS = {
     "battle": {
         "name": "几何魔像",
         "hp": 50,
         "desc": "由最基础的多边形堆成",
         "gold": 28,
+        "relic": 0,
+        "upgrade": 0,
     },
     "elite": {
         "name": "方程组·三元",
         "hp": 78,
         "desc": "三个未知数互相牵制，解开一个才能动下一个",
         "gold": 55,
+        "relic": 1,
+        "upgrade": 1,
     },
     "boss": {
         "name": "不可解之影",
         "hp": 120,
         "desc": "它本身就是那个矛盾",
         "gold": 120,
+        "relic": 1,
+        "upgrade": 2,
     },
 }
+
+
+def sieved_card(deck):
+    """遗物「质数筛」：从牌库里挑出最弱的一张（只读，不改 deck）。
+
+    强弱只看固定收益量：伤害 + 格挡。抽牌 / 清格挡这类功能卡没有数值，
+    权重记 0 —— 它们本来就在「弱」那一档，被筛掉不冤。
+    牌库为空返回 None。
+    """
+    if not deck:
+        return None
+    return min(deck, key=lambda c: c.effect.get("dmg", 0)
+                                    + c.effect.get("block", 0))
 
 
 class BattleScene:
@@ -169,6 +191,16 @@ class BattleScene:
         # 玩家立绘动画（无素材的角色 has_art=False，draw 会退回符号占位）
         self.p_anim = char_art.get_char_art(player.char_id)
 
+        # ---- 角色被动（trait，文案在 player.CHARACTERS，效果在这里结算）----
+        # 三个被动都按 char_id 判断，不额外加存档字段，老存档一样跑得动。
+        self.char_id = player.char_id
+        # 演算者【直感】：本回合那张「首张数字卡」用掉了没有
+        self.first_number_used = False
+        # 构形师【承形】：玩家点结束回合那一刻还剩多少格挡
+        self.carry_block = 0
+        # 解方程者【代入】：每回合抽牌阶段多抽 1 张
+        self.draw_bonus = 1 if player.char_id == "solver" else 0
+
         # ---- 敌人侧 ----
         self.e_name = cfg["name"]
         self.e_max_hp = int(cfg["hp"] * enemy_hp_mult)
@@ -184,15 +216,24 @@ class BattleScene:
 
         # ---- 牌 ----
         self.deck = [c.clone() for c in player.deck]
+        # 遗物「质数筛」：战斗开始时从牌库筛掉 1 张最弱的卡。
+        # 必须赶在洗牌抽牌之前做，否则筛掉的可能是已经上手的那张。
+        self.sieved = None
+        if player.has_relic("质数筛"):
+            self.sieved = sieved_card(self.deck)
+            if self.sieved is not None:
+                self.deck.remove(self.sieved)
         random.shuffle(self.deck)
         self.hand = []
         self.discard = []
-        self.draw_cards(5)
+        self.draw_cards(5 + self.draw_bonus)
 
         # ---- 交互 ----
         self.sel_card = None
         self.pending_number = None
         self.log = ["遭遇 %s！算对才能出牌。" % self.e_name]
+        if self.sieved is not None:
+            self.log.insert(0, "「质数筛」生效：筛掉了「%s」" % self.sieved.name)
         self.quiz = None
         self.combo_hint = ""
 
@@ -203,9 +244,8 @@ class BattleScene:
         self.extra_block_first = 0
         if player.has_relic("勾股定理"):
             self.extra_block_first = 3
-        if player.has_relic("公理石"):
-            # 战斗内生命上限加成由 Player 那边处理，这里不重复
-            pass
+        # 「公理石」的最大生命加成在 Player.add_relic 里结算（拿到就生效），
+        # 战斗这边不用管；「质数筛」见上面牌组那一段。
 
         # ---- 字体 ----
         self.F_BIG = E.load_font(34)
@@ -291,6 +331,14 @@ class BattleScene:
         bonus = 0
         if self.player.has_relic("约等号") and "dmg" in eff:
             bonus = 1
+        # 演算者【直感】：每回合打出的第一张数字卡伤害 +1。
+        # 判定放在这里而不是 submit_quiz —— 算对才叫「打出」，
+        # 不然算错一次就把直感白嫖掉了。
+        if (self.char_id == "calculator" and card.ctype == "number"
+                and "dmg" in eff and not self.first_number_used):
+            bonus += 1
+            self.first_number_used = True
+            self.log.insert(0, "「直感」生效：本回合首张数字卡 +1 伤害")
 
         if "dmg" in eff:
             dmg = eff["dmg"] + bonus
@@ -345,9 +393,16 @@ class BattleScene:
 
     # ==================== 回合 ====================
     def end_turn(self):
+        """结束玩家回合 —— 这里**坚决不清格挡**。
+
+        清早了敌人这一下就整打在血上，格挡就变成「只显示、不生效」
+        （曾经就是这么错的，玩家进游戏一眼就发现了）。
+        格挡要活到 enemy_act() 结算完，新回合开始时才归零。
+        构形师【承形】看的正是这一刻还剩多少格挡。
+        """
         self.discard.extend(self.hand)
         self.hand.clear()
-        self.p_block = 0
+        self.carry_block = self.p_block if self.char_id == "geometer" else 0
         self.phase = "enemy"
 
     def enemy_act(self):
@@ -372,9 +427,16 @@ class BattleScene:
         if self.phase == "enemy":
             self.turn += 1
             self.p_energy = self.p_max_energy
+            # 新回合才开始清格挡（上回合留下的格挡不跨回合保留）
             self.p_block = 0
+            # 构形师【承形】：上回合结束时有余留格挡 -> 这回合起步先给 2 点
+            if self.carry_block > 0:
+                self.p_block = 2
+                self.log.insert(0, "「承形」生效：+2 格挡")
+            self.carry_block = 0
+            self.first_number_used = False          # 新回合，直感重置
             self._eq_used = False
-            n = 5 + (1 if self.player.has_relic("对数尺") else 0)
+            n = 5 + self.draw_bonus + (1 if self.player.has_relic("对数尺") else 0)
             self.draw_cards(n)
             self.roll_intent()
             self.phase = "player"

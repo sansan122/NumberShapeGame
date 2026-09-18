@@ -27,6 +27,9 @@ import random
 import pygame
 
 import game_env as E
+# 遗物池放在 player.py —— 地图的路线代价也要发遗物，
+# 放在这个模块里的话 map_scene 反过来 import 本模块，绕成一个环。
+from player import RELIC_POOL, roll_unowned_relic   # noqa: F401
 
 # ==================== 配色（与地图/战斗统一）====================
 BG          = (246, 245, 240)
@@ -62,18 +65,87 @@ CARD_POOL = [
     ("归零",   "shape",  0, "清空敌人格挡",    1, {"strip": True}),
 ]
 
-RELIC_POOL = [
-    ("勾股定理", "每回合首次打出图形卡，额外获得 3 点格挡"),
-    ("质数筛",   "战斗开始时，从牌库移除 1 张最弱的卡"),
-    ("换元法",   "每回合第一次算错不消耗卡牌"),
-    ("对数尺",   "每回合多抽 1 张牌"),
-    ("约等号",   "所有『造成伤害』的卡 +1 伤害"),
-    ("公理石",   "最大生命 +12"),
-]
+#: 遗物池已搬到 player.py（见那边的 RELIC_POOL），这里只留名字导入。
 
 
 def _card_color(ctype):
     return ACCENT if ctype == "number" else GREEN
+
+
+# ==================== 卡片网格 / 强化 / 卡面（休整点与战利品共用）====================
+CARD_W, CARD_H, CARD_GAP = 132, 176, 16
+
+
+def card_grid_rects(n):
+    """把 n 张卡排成一个居中的网格，返回 rect 列表（n<=0 返回空表）。
+
+    一行放得下就单行、位置略低；放不下就折行并整体上移，
+    免得最后一行压到屏幕底部。
+    """
+    if n <= 0:
+        return []
+    per_row = max(1, (WIDTH - 120) // (CARD_W + CARD_GAP))
+    rows = max(1, (n + per_row - 1) // per_row)
+    shown = min(per_row, n)
+    x0 = WIDTH // 2 - (shown * (CARD_W + CARD_GAP) - CARD_GAP) // 2
+    y0 = 200 if rows == 1 else 176
+    return [pygame.Rect(x0 + (i % per_row) * (CARD_W + CARD_GAP),
+                        y0 + (i // per_row) * (CARD_H + 14),
+                        CARD_W, CARD_H)
+            for i in range(n)]
+
+
+def upgrade_card(player, card):
+    """强化一张卡：数值 +3 / 抽牌 +1，名字加个加号。
+
+    返回一句说明（"伤害 +3" 之类）；这张卡没有任何可强化的数值时
+    （比如「归零」只有清格挡）返回 ""，而且**不会**给它加加号 ——
+    以前是先无脑加个 "+" 再什么都不改，玩家白花一次强化机会。
+    """
+    eff = card.effect
+    if "dmg" in eff:
+        eff["dmg"] += 3
+        card.desc = "造成 %d 点伤害" % eff["dmg"]
+        what = "伤害 +3"
+    elif "block" in eff:
+        eff["block"] += 3
+        card.desc = "获得 %d 点格挡" % eff["block"]
+        what = "格挡 +3"
+    elif "draw" in eff:
+        eff["draw"] += 1
+        card.desc = "抽 %d 张牌" % eff["draw"]
+        what = "抽牌 +1"
+    else:
+        return ""
+    card.name = card.name + "+"
+    player.log("强化了「%s」（%s）" % (card.name, what))
+    return what
+
+
+def draw_card_tile(screen, r, card, hover, f_sml, f_tiny):
+    """画一张「可点选」的卡（强化界面用）。"""
+    col = _card_color(card.ctype)
+    r = r.move(0, -10 if hover else 0)
+    pygame.draw.rect(screen, (228, 226, 218), r.move(0, 4), border_radius=10)
+    pygame.draw.rect(screen, (255, 252, 240) if hover else PANEL, r,
+                     border_radius=10)
+    pygame.draw.rect(screen, col, r, 3, border_radius=10)
+
+    bar = pygame.Rect(r.x, r.y, r.w, 32)
+    pygame.draw.rect(screen,
+                     ACCENT_SOFT if card.ctype == "number" else GREEN_SOFT,
+                     bar, border_top_left_radius=10, border_top_right_radius=10)
+
+    nm = f_sml.render(card.name, True, TEXT)
+    screen.blit(nm, nm.get_rect(center=(r.centerx, r.y + 17)))
+
+    # 费用
+    pygame.draw.circle(screen, col, (r.x + 18, r.y + 17), 12)
+    cst = f_tiny.render(str(card.cost), True, (255, 255, 255))
+    screen.blit(cst, cst.get_rect(center=(r.x + 18, r.y + 17)))
+
+    draw_wrapped(screen, card.desc, f_sml, TEXT_MUTE, r.x + 12, r.y + 52,
+                 r.w - 24)
 
 
 # ==================== 面板基类 ====================
@@ -167,7 +239,6 @@ class RestPanel(Panel):
         # 「选一张卡强化」才有卡片网格。一开始是空的，
         # 等玩家真的进了强化界面（没别的可选路径了）再排布。
         self.card_rects = []
-        self.card_y = 250
 
     def ensure_card_layout(self):
         """进入强化界面时才排布卡片（不然第一帧就会画到屏幕外）。"""
@@ -288,29 +359,7 @@ class RestPanel(Panel):
         screen.blit(tip, tip.get_rect(center=(WIDTH // 2, grid_bottom + 30)))
 
     def draw_card(self, screen, r, card, hover):
-        col = _card_color(card.ctype)
-        lift = 10 if hover else 0
-        r = r.move(0, -lift)
-        pygame.draw.rect(screen, (228, 226, 218), r.move(0, 4), border_radius=10)
-        pygame.draw.rect(screen, (255, 252, 240) if hover else PANEL, r,
-                         border_radius=10)
-        pygame.draw.rect(screen, col, r, 3, border_radius=10)
-
-        bar = pygame.Rect(r.x, r.y, r.w, 32)
-        pygame.draw.rect(screen, ACCENT_SOFT if card.ctype == "number" else GREEN_SOFT,
-                         bar, border_top_left_radius=10, border_top_right_radius=10)
-
-        nm = self.F_SML.render(card.name, True, TEXT)
-        screen.blit(nm, nm.get_rect(center=(r.centerx, r.y + 17)))
-
-        # 费用
-        pygame.draw.circle(screen, col, (r.x + 18, r.y + 17), 12)
-        cst = self.F_TINY.render(str(card.cost), True, (255, 255, 255))
-        screen.blit(cst, cst.get_rect(center=(r.x + 18, r.y + 17)))
-
-        # 描述
-        self.draw_wrapped(screen, card.desc, self.F_SML, TEXT_MUTE,
-                          r.x + 12, r.y + 52, r.w - 24)
+        draw_card_tile(screen, r, card, hover, self.F_SML, self.F_TINY)
 
 
 # ==================== 商店 ====================
@@ -351,9 +400,12 @@ class ShopPanel(Panel):
                           "value": value, "desc": desc, "cost": cost,
                           "effect": eff, "price": price, "sold": False})
         # 一件遗物
-        rname, rdesc = random.choice(RELIC_POOL)
-        stock.append({"kind": "relic", "name": rname, "desc": rdesc,
-                      "price": 120, "sold": False})
+        # 一件遗物（抽玩家还没有的；全都有了就不摆这一格）
+        got = roll_unowned_relic(self.player)
+        if got:
+            rname, rdesc = got
+            stock.append({"kind": "relic", "name": rname, "desc": rdesc,
+                          "price": 120, "sold": False})
         return stock
 
     def handle(self, event, mouse):
@@ -620,10 +672,16 @@ class EventPanel(Panel):
             self.msg = "你只是路过。"
         elif fn == "lose_hp_gain_relic":
             p.hp = max(1, p.hp - 10)
-            name, desc = random.choice(RELIC_POOL)
-            p.relics.append(name)
-            self.msg = "失去 10 点生命，获得遗物「%s」：%s" % (name, desc)
-            p.log("事件：获得遗物「%s」" % name)
+            got = roll_unowned_relic(p)
+            if got:
+                name, desc = got
+                p.add_relic(name)
+                self.msg = "失去 10 点生命，获得遗物「%s」：%s" % (name, desc)
+                p.log("事件：获得遗物「%s」" % name)
+            else:
+                # 遗物全收齐了就别再塞重复的（效果按名字算，重复等于没给）
+                self.msg = "失去 10 点生命 —— 但塔里的遗物都已在你手上"
+                p.log("事件：遗物已集齐")
         elif fn == "gain_max_hp":
             p.max_hp += 8
             p.hp += 8
@@ -748,6 +806,7 @@ class TreasurePanel(Panel):
         self.opened = False
         self.relic_name = None
         self.relic_desc = None
+        self.relic_gold = 0         # 遗物集齐时折现的金币
         self.msg = "点击宝箱打开它"
         self.box_rect = pygame.Rect(WIDTH // 2 - 120, 220, 240, 200)
         # 打开后那张卡片的矩形 + 收下按钮，一起在 __init__ 里定好
@@ -770,10 +829,23 @@ class TreasurePanel(Panel):
 
     def open(self):
         self.opened = True
-        name, desc = random.choice(RELIC_POOL)
-        self.relic_name, self.relic_desc = name, desc
-        self.player.relics.append(name)
-        self.player.log("宝箱：获得遗物「%s」" % name)
+        got = roll_unowned_relic(self.player)
+        if got:
+            self.relic_name, self.relic_desc = got
+            # 必须走 add_relic 而不是 relics.append ——
+            # 「公理石」那种「拿到就改数值」的遗物在那里结算
+            note = self.player.add_relic(self.relic_name)
+            if note:
+                # 补进描述里显示，不另开一行（面板下半部分是按钮，挤不下）
+                self.relic_desc = self.relic_desc + "（" + note + "）"
+            self.player.log("宝箱：获得遗物「%s」" % self.relic_name)
+        else:
+            self.relic_name = "遗物已集齐"
+            self.relic_gold = 40
+            self.relic_desc = ("塔里的遗物你都收下了，这一箱改成 %d 金币"
+                               % self.relic_gold)
+            self.player.gold += self.relic_gold
+            self.player.log("宝箱：遗物已集齐，+%d 金币" % self.relic_gold)
         self.msg = ""
 
     def draw_body(self, screen, mouse, t):
@@ -802,7 +874,8 @@ class TreasurePanel(Panel):
             pygame.draw.rect(screen, PANEL, box, border_radius=16)
             pygame.draw.rect(screen, GOLD, box, 3, border_radius=16)
 
-            tt = self.F_BIG.render("获得遗物", True, GOLD)
+            head = "遗物已集齐" if self.relic_gold else "获得遗物"
+            tt = self.F_BIG.render(head, True, GOLD)
             screen.blit(tt, tt.get_rect(center=(box.centerx, box.y + 48)))
 
             nm = self.F_BIG.render(self.relic_name, True, TEXT)
@@ -816,6 +889,154 @@ class TreasurePanel(Panel):
             pygame.draw.rect(screen, col, self.btn_ok, border_radius=10)
             bt = self.F_MID.render("收下", True, (255, 255, 255))
             screen.blit(bt, bt.get_rect(center=self.btn_ok.center))
+
+
+# ==================== 战利品（精英 / 层主战后）====================
+class SpoilsPanel(Panel):
+    """精英 / 层主倒下之后的战利品。
+
+    和普通战斗只掉金币不同，这一档还有两样：
+
+      1. **一件遗物** —— 自动收下，抽的是玩家还没有的那件
+      2. **选一张卡强化** —— 精英 1 次、层主 2 次
+         （次数写在 battle_scene.ENEMY_KINDS 里）
+
+    两个阶段串成一条线：先看遗物、点「收下」，再进选卡界面。
+    遗物集齐了就折现成金币；没牌可强化就直接结束。
+    两样都给不出来的话 __init__ 里就 done 了，
+    调用方看到 panel.done 直接回地图，不要开一个空面板。
+    """
+
+    title = "战利品"
+
+    def __init__(self, player, kind="elite", relics=1, upgrades=1):
+        super().__init__(player)
+        self.kind = kind
+        self.subtitle = ("层主留下的东西" if kind == "boss"
+                         else "精英留下的东西")
+        self.upgrade_quota = max(0, int(upgrades))
+        self.upgraded = []              # 这次强化过的卡名（只用于文案）
+
+        # ---- 遗物（发一件；这里是「有没有」的语义，配置里也都是 1 件）----
+        self.relic_name = None
+        self.relic_desc = None
+        self.relic_gold = 0
+        if relics > 0:
+            got = roll_unowned_relic(player)
+            if got:
+                self.relic_name, self.relic_desc = got
+                # 走 add_relic（不是 relics.append）——「公理石」那类
+                # 拿到就改数值的遗物要在那里结算
+                note = player.add_relic(self.relic_name)
+                if note:
+                    self.relic_desc = self.relic_desc + "（" + note + "）"
+                player.log("战利品：获得遗物「%s」" % self.relic_name)
+            else:
+                # 遗物全拿完了就别硬塞重复的（效果按名字算，重复等于白给）
+                self.relic_gold = 40
+                player.gold += self.relic_gold
+                player.log("战利品：遗物已集齐，折现 +%d 金币" % self.relic_gold)
+
+        # ---- 布局（和宝箱面板同一套尺寸，看着像一家人）----
+        self.result_rect = pygame.Rect(WIDTH // 2 - 300, 190, 600, 250)
+        self.btn_take = pygame.Rect(self.result_rect.centerx - 90,
+                                    self.result_rect.bottom - 62, 180, 46)
+        self.card_rects = []
+        self.cards = []
+
+        # ---- 阶段 ----
+        if self.relic_name or self.relic_gold:
+            self.stage = "relic"
+            self.msg = ""
+        else:
+            self._enter_upgrade()
+
+    # ---------- 阶段流转 ----------
+    def _enter_upgrade(self):
+        """进「选一张卡强化」阶段；没牌可强化（或没次数）就直接结束。"""
+        self.stage = "upgrade"
+        self.cards = list(self.player.deck_cards())
+        if self.upgrade_quota <= 0 or not self.cards:
+            self.finish()
+            return
+        self.card_rects = card_grid_rects(len(self.cards))
+        self.msg = "点击一张卡强化它（数值 +3）"
+
+    # ---------- 事件 ----------
+    def handle(self, event, mouse):
+        if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return None
+
+        if self.stage == "relic":
+            if self.btn_take.collidepoint(mouse):
+                self._enter_upgrade()
+            return None
+
+        for i, c in enumerate(self.cards):
+            if self.card_rects[i].collidepoint(mouse):
+                what = upgrade_card(self.player, c)
+                if not what:
+                    self.msg = "「%s」没有可强化的数值，换一张" % c.name
+                    return None
+                self.upgraded.append(c.name)
+                self.upgrade_quota -= 1
+                self.cards.remove(c)        # 同一张卡在一次面板里只强化一次
+                if self.upgrade_quota <= 0 or not self.cards:
+                    return self.finish()
+                self.card_rects = card_grid_rects(len(self.cards))
+                self.msg = "点击一张卡强化它（数值 +3）"
+                return None
+        return None
+
+    # ---------- 绘制 ----------
+    def draw_body(self, screen, mouse, t):
+        if self.stage == "relic":
+            self.draw_relic(screen, mouse)
+        else:
+            self.draw_pick(screen, mouse)
+
+    def draw_relic(self, screen, mouse):
+        box = self.result_rect
+        pygame.draw.rect(screen, PANEL, box, border_radius=16)
+        pygame.draw.rect(screen, PURPLE, box, 3, border_radius=16)
+
+        tt = self.F_BIG.render("获得遗物", True, PURPLE)
+        screen.blit(tt, tt.get_rect(center=(box.centerx, box.y + 44)))
+
+        if self.relic_name:
+            nm = self.F_BIG.render(self.relic_name, True, TEXT)
+            screen.blit(nm, nm.get_rect(center=(box.centerx, box.y + 94)))
+            self.draw_wrapped(screen, self.relic_desc, self.F_SML, TEXT_MUTE,
+                              box.x + 40, box.y + 128, box.w - 80, center=True)
+        else:
+            nm = self.F_BIG.render("遗物已集齐", True, TEXT)
+            screen.blit(nm, nm.get_rect(center=(box.centerx, box.y + 94)))
+            gd = self.F_SML.render("折现 +%d 金币" % self.relic_gold, True, GOLD)
+            screen.blit(gd, gd.get_rect(center=(box.centerx, box.y + 136)))
+
+        hover = self.btn_take.collidepoint(mouse)
+        col = (63, 56, 140) if hover else PURPLE
+        pygame.draw.rect(screen, col, self.btn_take, border_radius=10)
+        bt = self.F_MID.render("收下", True, (255, 255, 255))
+        screen.blit(bt, bt.get_rect(center=self.btn_take.center))
+
+    def draw_pick(self, screen, mouse):
+        for i, c in enumerate(self.cards):
+            r = self.card_rects[i]
+            draw_card_tile(screen, r, c, r.collidepoint(mouse),
+                           self.F_SML, self.F_TINY)
+
+        grid_bottom = (max(r.bottom for r in self.card_rects)
+                       if self.card_rects else 400)
+        left = self.upgrade_quota - len(self.upgraded)
+        prog = self.F_MID.render("还能强化 %d 次" % max(0, left), True, ACCENT)
+        screen.blit(prog, prog.get_rect(center=(WIDTH // 2, grid_bottom + 34)))
+
+        if self.upgraded:
+            done = self.F_SML.render("已强化：" + "、".join(self.upgraded),
+                                     True, TEXT_MUTE)
+            screen.blit(done, done.get_rect(center=(WIDTH // 2,
+                                                   grid_bottom + 62)))
 
 
 # ==================== 通用文字折行 ====================

@@ -366,13 +366,45 @@ class Game:
         r = self.battle.handle(event, mouse)
         if r == "leave":
             result = self.battle.result
+            kind = self.battle.kind
             self.battle = None
             if result == "lose":
                 self.flash("%s倒下了 —— 按 R 重新开始" % self.player.char["name"], 6)
                 self.mode = "dead"
             else:
-                self.after_node()
+                self.open_spoils(kind)
         return None
+
+    def open_spoils(self, kind):
+        """战斗赢了：算这一场该掉什么战利品。
+
+        精英 / 层主按 ENEMY_KINDS 里的配置发遗物和强化次数；
+        同时把玩家身上挂着的 pending_upgrades 一起兑现 ——
+        路线代价「开区间」承诺过「战后额外获得 1 次强化」。
+
+        有东西可发就开战利品面板。走的是 mode="node" 那条路，
+        pending_node 还留着，面板选完会自己调 after_node()，
+        所以「打完最后一行进下一层」的推进逻辑不受影响。
+        什么都没得发（普通战斗）就直接回地图。
+        """
+        cfg = ENEMY_KINDS.get(kind) or {}
+        relics = cfg.get("relic", 0)
+        upgrades = cfg.get("upgrade", 0) + self.player.pending_upgrades
+        self.player.pending_upgrades = 0
+
+        if relics <= 0 and upgrades <= 0:
+            self.after_node()
+            return
+
+        panel = NS.SpoilsPanel(self.player, kind, relics=relics,
+                               upgrades=upgrades)
+        if panel.done:
+            # 面板自己判断出「遗物集齐、也没牌可强化」，别开一个空面板
+            self.after_node()
+            return
+        panel.fonts = self.fonts
+        self.panel = panel
+        self.mode = "node"
 
     # ==================== 更新 ====================
     def update(self, dt):
