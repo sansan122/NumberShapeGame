@@ -10,7 +10,9 @@
     2. 用 PyInstaller 打包成单文件 exe
     3. 把 exe 和说明拷到一个干净的发布目录
     4. 在隔离环境里**自检一遍**（确认打包后真的能跑）
-    5. 读 exe 里的 PYZ 核对**代码指纹**（确认装进去的真是最新代码）
+    5. 读 exe 里的代码核对**代码指纹**（确认装进去的真是最新代码）
+       —— 被 import 的模块在 PYZ 里，入口脚本 main 在 CArchive 里，
+          两处都要查（见 verify_exe_code 里的说明）
 
 产出的发布目录（可以直接压缩发给别人）：
     release/数与形/
@@ -38,6 +40,7 @@
     所以 clear_dir 里必须 catch BaseException，并准备好"改名腾位置"的兜底。
 """
 
+import marshal
 import shutil
 import subprocess
 import sys
@@ -70,6 +73,12 @@ EXE_NAME = "NumbersAndForms.exe"
 # 而且字符串必须是**从源码复制**的，不是凭印象编的（编过一次，源码里根本没有）。
 #
 # 每次改了游戏代码，从这里开头的注释或 docstring 里挑一句新的加进来。
+#
+# ⚠️ 表里**必须至少留一条指向 main 的**（下面那两条就是）。
+#    理由：main 是入口脚本，它**不在 PYZ 里**、走的是 CArchive 那一路
+#    （见 open_exe_strings 的说明）。留着一条指向它的指纹，等于顺手
+#    给「读取逻辑有没有覆盖入口脚本」上了个哨兵 ——
+#    哪天有人把两处查找改回只查 PYZ，这两条会立刻失败。
 FINGERPRINTS = [
     ("map_scene", "相机边界复用 camera_for", "上下界直接复用"),
     ("map_scene", "camera_for 注释更正", "别再照着它改符号"),
@@ -139,18 +148,34 @@ def walk_strings(code):
     return out
 
 
-def verify_exe_code(exe):
-    """读 exe 里的 PYZ，逐条核对代码指纹。对不上就中止打包。"""
-    print("  读 %s 的 PYZ ..." % exe.name)
-    try:
-        from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
-    except ImportError as e:
-        raise SystemExit("!! 需要 PyInstaller 才能做内容自检：%s" % e)
+def open_exe_strings(exe):
+    """打开 exe，返回 `(strings_of, pyz_modules, close)`。
+
+    `strings_of(mod)` 给出该模块全部字符串常量拼成的一段文本；
+    返回 None 表示「这个模块在包里找不到」。
+    `close()` 负责清理临时文件（用完必须调）。
+
+    ⚠️ **必须查两个地方，只查 PYZ 是不行的**（踩过）：
+    PyInstaller 把**被 import 的模块**塞进 PYZ（zlib 压缩），
+    但**入口脚本是单独处理的** —— 它以 marshal 过的 code object
+    直接躺在 CArchive 里，条目名就是脚本名（main.py -> "main"，
+    头 4 字节 b'c\\x00\\x00\\x00' 就是 marshal 的 code 标记）。
+
+    只查 PYZ 的写法会漏掉所有指向 main 的指纹，汇总成「exe 不是最新代码」，
+    而源码里那几条明明在 —— 看着像打包坏了，其实是指纹找错了地方。
+    （这个坑直到本机装上 PyInstaller、真跑了一次打包才暴露：
+      本机预检只读源码、不读包，永远发现不了。）
+
+    这里把「怎么读包」收口成**一份实现**，打包自检与
+    tmp/verify_exe_contents.py 共用 —— 同一份逻辑抄两处必然漂移，
+    指纹表已经吃过一次这个亏。
+    """
+    from PyInstaller.archive.readers import CArchiveReader, ZlibArchiveReader
 
     ar = CArchiveReader(str(exe))
     pyz_names = [n for n in ar.toc if n.endswith(".pyz")]
     if not pyz_names:
-        raise SystemExit("!! exe 里没有 PYZ，不像是 PyInstaller 产物")
+        raise ValueError("exe 里没有 PYZ，不像是 PyInstaller 产物")
 
     raw = ar.extract(pyz_names[0])
     if isinstance(raw, tuple):
@@ -158,17 +183,45 @@ def verify_exe_code(exe):
     # 落到系统临时目录：不在仓库里留东西，也不占用 tmp/ 的清理逻辑
     tmp_pyz = Path(tempfile.gettempdir()) / "_pkg_check.pyz"
     tmp_pyz.write_bytes(raw)
+    z = ZlibArchiveReader(str(tmp_pyz))
 
-    try:
-        z = ZlibArchiveReader(str(tmp_pyz))
-        cache = {}
+    cache = {}
 
-        def strings_of(mod):
-            if mod not in cache:
-                cache[mod] = ("\n".join(walk_strings(z.extract(mod)))
-                              if mod in z.toc else None)
+    def strings_of(mod):
+        if mod in cache:
             return cache[mod]
 
+        text = None
+        if mod in z.toc:                            # ① 被 import 的模块
+            text = "\n".join(walk_strings(z.extract(mod)))
+        elif mod in ar.toc:                         # ② 入口脚本
+            data = ar.extract(mod)
+            if isinstance(data, tuple):
+                data = data[1]
+            for blob in (data, data[16:]):          # 带 pyc 头时跳过 16 字节
+                try:
+                    text = "\n".join(walk_strings(marshal.loads(blob)))
+                    break
+                except Exception:
+                    continue
+
+        cache[mod] = text
+        return text
+
+    return strings_of, list(z.toc), lambda: safe_unlink(tmp_pyz)
+
+
+def verify_exe_code(exe):
+    """核对 exe 里的代码指纹。对不上就中止打包。"""
+    print("  读 %s 里的代码 ..." % exe.name)
+    try:
+        strings_of, _mods, close = open_exe_strings(exe)
+    except ImportError as e:
+        raise SystemExit("!! 需要 PyInstaller 才能做内容自检：%s" % e)
+    except ValueError as e:
+        raise SystemExit("!! %s" % e)
+
+    try:
         missing = []
         for title, group in (("对照组（必须命中，确认解析流程正常）", BASELINE),
                              ("代码指纹（必须命中，确认是最新代码）", FINGERPRINTS)):
@@ -176,7 +229,10 @@ def verify_exe_code(exe):
             for mod, label, needle in group:
                 text = strings_of(mod)
                 if text is None:
-                    print("    [FAIL] %-28s （模块 %s 不在包里）" % (label, mod))
+                    # 分开说：「找不到模块」和「找不到字符串」是两种毛病，
+                    # 合成一个 FAIL 就没法区分「指纹写错」和「打包漏了」。
+                    print("    [FAIL] %-28s （模块 %s 既不在 PYZ 也不在"
+                          " CArchive —— 指纹的模块名写错了）" % (label, mod))
                     missing.append(label)
                     continue
                 ok = needle in text
@@ -184,7 +240,7 @@ def verify_exe_code(exe):
                     missing.append(label)
                 print("    [%s] %-28s %s" % ("OK  " if ok else "FAIL", label, needle))
     finally:
-        safe_unlink(tmp_pyz)
+        close()
 
     if missing:
         raise SystemExit(

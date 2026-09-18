@@ -2585,6 +2585,81 @@ def _square_n(self):
 
 ---
 
+### 46. 入口脚本不在 PYZ 里 —— 只查 PYZ 会漏掉所有指向 `main` 的指纹 ⚠️⚠️
+
+**这个坑躺了很久，因为它在「本机能跑」的时候永远不暴露。**
+
+本机预检（`tmp/verify_fingerprints.py`）是读**源码**拼字符串，
+它当然能找到 `main.py` 里的每一句话 —— 所以它一直全绿。
+可是 `打包.py` 第 5 步读的是**打完包之后的 exe**，那里的世界完全不一样。
+
+装上 PyInstaller 第一次真跑打包，第 5 步就报：
+
+```
+!! exe 里不是最新代码，缺 2 条指纹：F1/F2 开关音效与音乐、战利品里真的发了平方
+```
+
+而这两条指向的都是**同一个模块 `main`**，其余 46 条全过 ——
+这个「挂的全是同一个模块」的模式，就是本坑的指纹。
+
+**根因**（用 reader 开包实测）：
+
+```python
+ar = CArchiveReader(str(exe))
+z  = ZlibArchiveReader(pyz_path)
+len(z.toc)              # 232 个模块
+"main"     in z.toc     # False   ← 入口脚本根本不在 PYZ 里
+"__main__" in z.toc     # False
+"main"     in ar.toc    # True    ← 在这一层
+```
+
+PyInstaller 把**被 import 的模块**塞进 PYZ（zlib 压缩），
+但**入口脚本是单独处理的**：它以 **marshal 过的 code object**
+直接躺在 CArchive 里，条目名就是脚本名（`main.py` → `"main"`，
+头 4 字节 `b'c\x00\x00\x00'` 正是 marshal 的 code 标记）。
+
+于是「只查 PYZ」的自检对 `main` 的指纹一律判 FAIL，
+汇总成一句**看起来特别像真的**结论：「exe 不是最新代码」。
+照着它去重打包、去怀疑增量缓存，全是白忙。
+
+**修法：查两个地方。** 而且这份逻辑**只写一遍**
+（第 43 条刚讲过「同一份清单抄两处早晚漂移」，这次是同一个病的复发）——
+收口成 `打包.py` 的 `open_exe_strings()`，
+`打包.py` 第 5 步和 `tmp/verify_exe_contents.py` 共用：
+
+```python
+if mod in z.toc:                       # ① 被 import 的模块
+    text = "\n".join(walk_strings(z.extract(mod)))
+elif mod in ar.toc:                    # ② 入口脚本，marshal 的 code object
+    data = ar.extract(mod)
+    if isinstance(data, tuple):
+        data = data[1]
+    for blob in (data, data[16:]):     # 带 pyc 头时跳过 16 字节
+        try:
+            text = "\n".join(walk_strings(marshal.loads(blob))); break
+        except Exception:
+            continue
+```
+
+顺带把报错分开说：**「模块找不到」和「字符串找不到」不是一回事**——
+合成同一个 FAIL 就没法区分「指纹写错了模块名」和「打包真的漏了代码」。
+
+> 一条通用判据（和第 43 条同源）：**凡是「同一件事有两份实现」，
+> 就要问「它们会不会有一天不一样」。** 会 —— 就收口成一份。
+> 这次是「读取 exe 的逻辑」，上次是「指纹表」，下次可能是别的。
+
+**还有一处连坐**：`tmp/_run.py`（通用 runner）里写了 `int(e.code or 0)`，
+而 `打包.py` 自检失败时抛的是**字符串** `SystemExit`，
+`int()` 直接 ValueError —— 这个异常发生在 `except` 块里，
+于是**写输出文件那行代码根本执行不到**，我最想看的那份指纹明细
+（48 条逐条结果）全丢了，只剩一个 ValueError traceback。
+修好后才知道「挂的是 main 那两条」这个关键线索。
+
+> 所以：`except SystemExit as e` 之后**不能假设 `e.code` 是整数**。
+> 凡是「环境不具备就中止」的脚本都爱用字符串抛异常。
+
+---
+
 ## 十二、接下来打算做的模块
 
 按优先级排：
