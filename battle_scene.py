@@ -174,6 +174,80 @@ def sieved_card(deck):
                                     + c.effect.get("block", 0))
 
 
+# ==================== 题目（三种题型）====================
+def _darken(col, f=0.78):
+    """按钮 hover / 按下时的暗调色（从主色派生，不写死颜色）。"""
+    return tuple(int(c * f) for c in col[:3])
+
+
+# 想打出一张卡就得先答题，这是本作的核心。题型和出牌方式一一对应：
+#   数字卡单独打出        -> 算术题（原来的加减乘）
+#   图形卡单独打出        -> 认图形名称（图形卡上没有数字，出算术题无从下手）
+#   数字卡 + 图形卡组合   -> 算图形面积（数字卡上的数就是图形上的边）
+#
+# π 取 3：圆面积要能整除，不然「算对」变成一道小数题，小学生直接卡住。
+PI_APPROX = 3
+
+#: 面积题的数值上限：数字卡的值不会超过它（输入框最多 4 位，面积必须装得下）
+MAX_SHAPE_SIDE = 12
+
+
+def roll_shape_dims(shape, v, rng=random):
+    """给面积题掷一组尺寸，返回 (dims, 面积)。
+
+    硬约束（都有测试盯着）：
+      · 尺寸全是正整数；
+      · **面积一定是整数** —— 三角形/梯形的高取偶数，÷2 才除得干净；
+      · 面积 ≤ 9999（输入框只收 4 位数字）。
+    v 是数字卡上的那个数，作为图形的「主尺寸」（底 / 边长 / 长 / 半径）。
+    """
+    v = max(2, min(int(v), MAX_SHAPE_SIDE))
+    if shape == "triangle":
+        h = 2 * rng.randint(1, 5)                  # 偶数高 -> 面积整除
+        return {"base": v, "height": h}, v * h // 2
+    if shape == "square":
+        return {"side": v}, v * v
+    if shape == "rectangle":
+        h = rng.randint(2, 9)
+        while h == v:                              # 长宽一样就不是长方形了
+            h = rng.randint(2, 9)
+        return {"w": v, "h": h}, v * h
+    if shape == "parallelogram":
+        h = rng.randint(2, 9)
+        return {"base": v, "height": h}, v * h
+    if shape == "trapezoid":
+        top = rng.randint(2, 5)
+        bottom = v if v > top else top + rng.randint(1, 4)
+        h = 2 * rng.randint(1, 4)                  # 偶数高 -> 面积整除
+        return {"top": top, "bottom": bottom, "height": h}, (top + bottom) * h // 2
+    # circle（shape 不认识时也走这里：兜底成圆，题目潦草但不会崩）
+    return {"r": v}, PI_APPROX * v * v
+
+
+def shape_dims_text(shape, dims):
+    """面积题题面上那行尺寸描述。"""
+    if shape in ("triangle", "parallelogram"):
+        return "底 %g，高 %g" % (dims["base"], dims["height"])
+    if shape == "square":
+        return "边长 %g" % dims["side"]
+    if shape == "rectangle":
+        return "长 %g，宽 %g" % (dims["w"], dims["h"])
+    if shape == "trapezoid":
+        return "上底 %g，下底 %g，高 %g" % (dims["top"], dims["bottom"],
+                                          dims["height"])
+    if shape == "circle":
+        return "半径 %g，π 取 %d" % (dims["r"], PI_APPROX)
+    return ""
+
+
+def is_combo_types(a, b):
+    """两张卡能不能组合 —— 一数字 + 一图形就是「数形结合」。
+
+    两张都是数字卡 / 都是图形卡不算组合（同一个维度上凑不出一对新题面）。
+    """
+    return {a.ctype, b.ctype} == {"number", "shape"}
+
+
 class BattleScene:
     """一场战斗。"""
 
@@ -257,6 +331,9 @@ class BattleScene:
         self.BTN_END = pygame.Rect(1112, 545, 160, 56)
         self.BTN_SUBMIT = pygame.Rect(560, 492, 160, 46)
         self.QUIZ_BOX = pygame.Rect(380, 300, 520, 290)
+        # 图形题（算面积 / 认图形名称）要用更大的框：一题里既要摆得下图形，
+        # 又要摆得下选项按钮。算术题那个 520×290 的框塞不下。
+        self.QUIZ_BOX_FIG = pygame.Rect(330, 140, 620, 448)
 
         # ---- 舞台锚点（杀戮尖塔式：角色立于场地左右，血条画在脚边）----
         self.P_X, self.P_FOOT = 250, 486      # 玩家：站位 / 脚底
@@ -284,8 +361,13 @@ class BattleScene:
             if self.deck and len(self.hand) < 8:
                 self.hand.append(self.deck.pop())
 
-    # ==================== 算术题 ====================
+    # ==================== 出题 ====================
+    #: 题型 <-> 出牌方式的对应关系（写在卡面上的提示语也从这里来）
     def make_quiz(self, card):
+        """算术题 —— 单独打出一张卡时的默认题型。
+
+        （保留这个名字：它一直是「单卡出牌」的入口，测试脚本也在调它。）
+        """
         op = random.choice(["+", "×"])
         if op == "+":
             a, b = random.randint(3, 12), random.randint(3, 12)
@@ -293,40 +375,136 @@ class BattleScene:
         else:
             a, b = random.randint(2, 9), random.randint(2, 9)
             ans = a * b
-        return {"a": a, "b": b, "op": op, "ans": ans, "input": "", "card": card}
+        return {"kind": "arith", "a": a, "b": b, "op": op, "ans": ans,
+                "input": "", "card": card, "cards": [card],
+                "submit_rect": self.BTN_SUBMIT}
+
+    def make_area_quiz(self, number_card, shape_card):
+        """组合出牌（数字卡 + 图形卡）的题：**算这个图形的面积**。
+
+        数字卡上的那个数就是图形上的「主尺寸」（底 / 边长 / 长 / 半径），
+        另一维随机 —— 这就是「数形结合」四个字的字面意思：数变成形，形算回数。
+        面积公式写在题面上，玩家不用背公式，要算的是数。
+        """
+        shape = art_shapes.shape_of_card(shape_card.name) or "square"
+        dims, ans = roll_shape_dims(shape, number_card.value)
+        return {"kind": "area", "shape": shape, "dims": dims, "ans": ans,
+                "input": "", "card": number_card,
+                "cards": [number_card, shape_card],
+                "submit_rect": self._area_submit_rect()}
+
+    def make_name_quiz(self, shape_card):
+        """图形卡单独打出时的题：**认出这是什么图形**（四选一）。
+
+        图形卡上没有数字（value 恒为 0），出算术题无从下手；出认图形
+        既贴「形」这条线，又不用玩家在 720p 窗口里手打中文。
+        """
+        shape = art_shapes.shape_of_card(shape_card.name) or "square"
+        right = art_shapes.shape_cn(shape)
+        pool = [n for n in art_shapes.SHAPE_NAMES if n != right]
+        options = [right] + random.sample(pool, min(3, len(pool)))
+        random.shuffle(options)
+        return {"kind": "name", "shape": shape, "options": options,
+                "ans_idx": options.index(right), "pick": None,
+                "input": "", "card": shape_card, "cards": [shape_card],
+                "option_rects": self._name_option_rects(len(options)),
+                "submit_rect": self._fig_submit_rect("name")}
+
+    def _fig_submit_rect(self, kind):
+        """认图形题的提交按钮位置（面积题的按钮跟着填空线走，见下）。"""
+        box = self.QUIZ_BOX_FIG
+        return pygame.Rect(box.centerx - 70, box.y + 372, 140, 40)
+
+    def _area_submit_rect(self):
+        """面积题的提交按钮：跟在填空线右侧，输入和提交挤在同一行，
+        省下的纵向空间留给图形本身。"""
+        box = self.QUIZ_BOX_FIG
+        row_y = box.y + 358
+        lw = self.F_MID.size("S =")[0]
+        total = lw + 10 + 130 + 26 + 130
+        x0 = box.centerx - total // 2
+        return pygame.Rect(x0 + lw + 10 + 130 + 26, row_y, 130, 40)
+
+    def _name_option_rects(self, n):
+        """认图形题的选项按钮：两列网格，居中排。"""
+        box = self.QUIZ_BOX_FIG
+        w, h, gap = 250, 52, 18
+        out = []
+        for i in range(n):
+            row, col = i // 2, i % 2
+            cnt = min(2, n - row * 2)          # 奇数个时最后一行居中
+            total = cnt * w + (cnt - 1) * gap
+            x0 = box.centerx - total // 2
+            out.append(pygame.Rect(x0 + col * (w + gap),
+                                   box.y + 240 + row * (h + gap), w, h))
+        return out
 
     def submit_quiz(self):
+        """交卷判题。三种题型的对错判定不一样，答对之后的结算也不一样：
+        算术题 / 认图形 -> 单卡结算；面积题 -> 两张卡一起结算。"""
         q = self.quiz
         if q is None:
             return
-        try:
-            got = int(q["input"]) if q["input"] else None
-        except ValueError:
-            got = None
+        kind = q.get("kind", "arith")
+        got = None
 
-        if got == q["ans"]:
-            self.log.insert(0, "✓ %d %s %d = %d　算对了！"
-                            % (q["a"], q["op"], q["b"], q["ans"]))
-            self.resolve_card(q["card"])
+        if kind == "name":
+            got = q.get("pick")
+            correct = got == q["ans_idx"]
         else:
-            self.log.insert(0, "✗ %d %s %d = %d　算错了，卡牌失效"
-                            % (q["a"], q["op"], q["b"], q["ans"]))
+            try:
+                got = int(q["input"]) if q["input"] else None
+            except ValueError:
+                got = None
+            correct = got == q["ans"]
+
+        if correct:
+            if kind == "arith":
+                self.log.insert(0, "✓ %d %s %d = %d　算对了！"
+                                % (q["a"], q["op"], q["b"], q["ans"]))
+                self.resolve_card(q["card"])
+            elif kind == "area":
+                self.log.insert(0, "✓ 面积 %d　数形结合成立！" % q["ans"])
+                self.resolve_combo(q["cards"][0], q["cards"][1])
+            else:
+                self.log.insert(0, "✓ 这是%s　认对了！"
+                                % q["options"][q["ans_idx"]])
+                self.resolve_card(q["card"])
+        else:
+            if kind == "arith":
+                self.log.insert(0, "✗ %d %s %d = %d　算错了，卡牌失效"
+                                % (q["a"], q["op"], q["b"], q["ans"]))
+            elif kind == "area":
+                self.log.insert(0, "✗ 面积算错了（正解 %d）　两张卡一起失效"
+                                % q["ans"])
+            else:
+                self.log.insert(0, "✗ 这不是%s　卡牌失效"
+                                % q["options"][q["ans_idx"]])
             # 遗物「换元法」：每回合第一次算错不消耗卡牌
             if (self.player.has_relic("换元法") and
                     not getattr(self, "_eq_used", False)):
                 self._eq_used = True
-                self.log.insert(0, "「换元法」生效：这张卡被留下了")
-                if q["card"] in self.hand:
-                    q["card"].selected = False
+                n_cards = len(q.get("cards", [q["card"]]))
+                self.log.insert(0, "「换元法」生效：这%s被留下了"
+                                % ("两张卡都" if n_cards > 1 else "张卡"))
+                for c in q.get("cards", [q["card"]]):
+                    c.selected = False
             else:
-                if q["card"] in self.hand:
-                    self.hand.remove(q["card"])
-                self.discard.append(q["card"])
+                for c in q.get("cards", [q["card"]]):
+                    if c in self.hand:
+                        self.hand.remove(c)
+                    self.discard.append(c)
         self.quiz = None
         self.check_end()
 
     # ==================== 出牌结算 ====================
-    def resolve_card(self, card):
+    def _settle_card(self, card):
+        """结算一张卡的效果（伤害 / 格挡 / 抽牌 / 清格挡）。
+
+        单卡出牌和组合出牌**都走这里** —— 遗物加成（约等号 / 勾股定理）
+        和角色被动（直感）只有这一份实现，两条路不会算出两套数值。
+        这个方法只管效果，不管弃牌、不管胜负（那是调用方的事）。
+        """
         eff = card.effect
         bonus = 0
         if self.player.has_relic("约等号") and "dmg" in eff:
@@ -366,12 +544,32 @@ class BattleScene:
             self.e_block = 0
             self.log.insert(0, "清空了敌人的格挡")
 
+    def resolve_card(self, card):
+        """单卡生效（算术题 / 认图形题答对之后）。"""
+        self._settle_card(card)
         if card in self.hand:
             self.hand.remove(card)
         self.discard.append(card)
 
         # 打完就要立刻结算胜负：不然把敌人打死之后
         # 战斗不会结束，还得等到「结束回合」才判胜。
+        self.check_end()
+
+    def resolve_combo(self, number_card, shape_card):
+        """「数形结合」生效：数字卡 + 图形卡一起算对面积之后走这里。
+
+        两张卡的效果**同时生效**，另外多抽 1 张牌 —— 一次组合要花两张卡、
+        两份能量、还只占一次出牌机会，不补一张手牌的话，
+        组合永远不如拆成两回合打，那这个机制就是个摆设。
+        """
+        self._settle_card(number_card)
+        self._settle_card(shape_card)
+        self.draw_cards(1)
+        self.log.insert(0, "「数形结合」奖励：额外抽 1 张牌")
+        for c in (number_card, shape_card):
+            if c in self.hand:
+                self.hand.remove(c)
+            self.discard.append(c)
         self.check_end()
 
     def check_end(self):
@@ -451,6 +649,70 @@ class BattleScene:
         else:
             self.e_intent = "buff"
 
+    # ==================== 选牌 / 组合 ====================
+    def clear_selection(self):
+        """把手牌上的选中状态全部清掉（取消选择、出牌之后都走这里）。"""
+        self.sel_card = None
+        self.pending_number = None
+        self.combo_hint = ""
+        for c in self.hand:
+            c.selected = False
+
+    def hint_for(self, card):
+        """选中一张卡时的提示语：告诉他下一步能干什么 ——
+        这是「组合」这条机制唯一的入口提示，不能省。"""
+        if card.ctype == "number":
+            return "已选数字 %d —— 再点图形卡＝组合（算面积题）" % card.value
+        return "已选「%s」—— 再点数字卡＝组合（算面积题）" % card.name
+
+    def start_combo(self, card_a, card_b):
+        """把选中的数字卡和图形卡合成一次「数形结合」出牌。
+
+        费用是两张卡之和（组合不是免费的），题目是图形的面积。
+        能量不够就把这次组合挡下来，并且**不改变**已选状态 ——
+        玩家可以少选一张，或者结束回合。
+        """
+        num = card_a if card_a.ctype == "number" else card_b
+        shp = card_b if card_a.ctype == "number" else card_a
+        cost = num.cost + shp.cost
+        if self.p_energy < cost:
+            self.log.insert(0, "能量不足！组合需要 %d 点能量" % cost)
+            return False
+        self.p_energy -= cost
+        self.quiz = self.make_area_quiz(num, shp)
+        self.clear_selection()
+        return True
+
+    def _quiz_key(self, event):
+        """答题时的键盘输入：数字题敲数字，认图形题按 1-4。"""
+        q = self.quiz
+        if q.get("kind") == "name":
+            if event.key == pygame.K_RETURN:
+                self.submit_quiz()
+            elif event.key == pygame.K_BACKSPACE:
+                q["pick"] = None
+            elif event.unicode in ("1", "2", "3", "4"):
+                i = int(event.unicode) - 1
+                if i < len(q["options"]):
+                    q["pick"] = i
+            return
+        if event.key == pygame.K_BACKSPACE:
+            q["input"] = q["input"][:-1]
+        elif event.key == pygame.K_RETURN:
+            self.submit_quiz()
+        elif event.unicode.isdigit() and len(q["input"]) < 4:
+            q["input"] += event.unicode
+
+    def _quiz_click(self, mouse):
+        """答题弹窗里的点击：认图形题的选项按钮 + 提交按钮。"""
+        q = self.quiz
+        for i, r in enumerate(q.get("option_rects", [])):
+            if r.collidepoint(mouse):
+                q["pick"] = i
+                return
+        if q.get("submit_rect", self.BTN_SUBMIT).collidepoint(mouse):
+            self.submit_quiz()
+
     # ==================== 事件 ====================
     def handle(self, event, mouse):
         if self.done:
@@ -462,17 +724,9 @@ class BattleScene:
 
         if event.type == pygame.KEYDOWN:
             if self.quiz is not None:
-                if event.key == pygame.K_BACKSPACE:
-                    self.quiz["input"] = self.quiz["input"][:-1]
-                elif event.key == pygame.K_RETURN:
-                    self.submit_quiz()
-                elif event.unicode.isdigit() and len(self.quiz["input"]) < 4:
-                    self.quiz["input"] += event.unicode
-            else:
-                if event.key == pygame.K_ESCAPE:
-                    self.sel_card = None
-                    for c in self.hand:
-                        c.selected = False
+                self._quiz_key(event)
+            elif event.key == pygame.K_ESCAPE:
+                self.clear_selection()
             return None
 
         if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
@@ -480,8 +734,7 @@ class BattleScene:
 
         # 答题弹窗优先
         if self.quiz is not None:
-            if self.BTN_SUBMIT.collidepoint(mouse):
-                self.submit_quiz()
+            self._quiz_click(mouse)
             return None
 
         if self.phase == "player" and self.BTN_END.collidepoint(mouse):
@@ -493,9 +746,13 @@ class BattleScene:
             for c in self.hand:
                 if c.rect and c.rect.collidepoint(mouse):
                     if c.selected:
-                        c.selected = False
-                        self.sel_card = None
-                        self.pending_number = None
+                        self.clear_selection()
+                        return None
+                    # 已经选了一张，再点**另一类**的卡 -> 数形结合，
+                    # 这一步就是「组合」本身的入口
+                    if (self.sel_card is not None and self.sel_card is not c
+                            and is_combo_types(self.sel_card, c)):
+                        self.start_combo(self.sel_card, c)
                         return None
                     if self.p_energy < c.cost:
                         self.log.insert(0, "能量不足！")
@@ -504,22 +761,21 @@ class BattleScene:
                         x.selected = False
                     c.selected = True
                     self.sel_card = c
-                    if c.ctype == "number":
-                        self.pending_number = c
-                        self.combo_hint = "已选数字 %d，可再点图形卡组合" % c.value
-                    else:
-                        self.combo_hint = ""
+                    self.pending_number = c if c.ctype == "number" else None
+                    self.combo_hint = self.hint_for(c)
                     return None
 
             # 点空白 = 打出选中的卡
             if self.sel_card:
                 card = self.sel_card
                 self.p_energy -= card.cost
-                self.quiz = self.make_quiz(card)
-                card.selected = False
-                self.sel_card = None
-                self.pending_number = None
-                self.combo_hint = ""
+                # 图形卡上没有数字，单独打出考「认图形名称」；
+                # 数字卡单独打出考算术。
+                if card.ctype == "shape":
+                    self.quiz = self.make_name_quiz(card)
+                else:
+                    self.quiz = self.make_quiz(card)
+                self.clear_selection()
         return None
 
     def update(self, dt):
@@ -915,11 +1171,19 @@ class BattleScene:
         # 否则文字的降部会贴上卡牌顶端）
         if self.combo_hint:
             ht = self.F_SML.render(self.combo_hint, True, AMBER)
-            screen.blit(ht, (WIDTH // 2 - ht.get_width() // 2, HEIGHT - CARD_H - 96))
+            screen.blit(ht, (WIDTH // 2 - ht.get_width() // 2,
+                             HEIGHT - CARD_H - 116))
+            sub = self.F_TINY.render(
+                "再点另一类卡 ＝ 组合（面积题）；点空白处 ＝ 单独打出",
+                True, TEXT_MUTE)
+            screen.blit(sub, (WIDTH // 2 - sub.get_width() // 2,
+                              HEIGHT - CARD_H - 90))
         elif self.phase == "player" and not self.done:
             ht = self.F_TINY.render(
-                "点卡选中 → 再点空白处打出（会先出一道题）", True, TEXT_MUTE)
-            screen.blit(ht, (WIDTH // 2 - ht.get_width() // 2, HEIGHT - CARD_H - 92))
+                "数字卡 + 图形卡 ＝ 组合（算面积）；单出图形卡 ＝ 认图形名称",
+                True, TEXT_MUTE)
+            screen.blit(ht, (WIDTH // 2 - ht.get_width() // 2,
+                             HEIGHT - CARD_H - 92))
 
         # ---------- 答题弹窗 ----------
         if self.quiz is not None:
@@ -984,6 +1248,39 @@ class BattleScene:
         veil.fill((0, 0, 0, 90))
         screen.blit(veil, (0, 0))
 
+        q = self.quiz
+        kind = q.get("kind", "arith")
+        if kind == "arith":
+            self._draw_arith_quiz(screen, mouse, t_ms, q)
+        else:
+            self._draw_figure_quiz(screen, mouse, t_ms, q, kind)
+
+    def _draw_typed(self, screen, typed, line_x0, line_x1, line_y, col, t_ms):
+        """填空线 + 已输入的内容 + 闪烁光标（数字题和面积题共用）。"""
+        cx_mid = (line_x0 + line_x1) // 2
+        if typed:
+            tt = self.F_BIG.render(typed, True, TEXT)
+            screen.blit(tt, tt.get_rect(midbottom=(cx_mid, line_y - 4)))
+            if (t_ms // 500) % 2 == 0:
+                cur_x = cx_mid + tt.get_width() // 2 + 8
+                pygame.draw.line(screen, col, (cur_x, line_y - 40),
+                                 (cur_x, line_y - 4), 3)
+        elif (t_ms // 500) % 2 == 0:
+            pygame.draw.line(screen, col, (cx_mid, line_y - 40),
+                             (cx_mid, line_y - 4), 3)
+
+    def _draw_submit(self, screen, mouse, q, col):
+        """提交按钮。位置按题型存在 quiz["submit_rect"] 里 ——
+        面积题的按钮跟着填空线走，其他题用固定的那个。"""
+        r = q.get("submit_rect", self.BTN_SUBMIT)
+        hover = r.collidepoint(mouse)
+        pygame.draw.rect(screen, _darken(col) if hover else col, r,
+                         border_radius=10)
+        sb = self.F_MID.render("提交", True, (255, 255, 255))
+        screen.blit(sb, sb.get_rect(center=r.center))
+
+    def _draw_arith_quiz(self, screen, mouse, t_ms, q):
+        """算术题（单出数字卡）：大等式 + 填空线。"""
         box = self.QUIZ_BOX
         pygame.draw.rect(screen, PANEL, box, border_radius=16)
         pygame.draw.rect(screen, ACCENT, box, 3, border_radius=16)
@@ -991,7 +1288,6 @@ class BattleScene:
         title = self.F_MID.render("解出这道题，卡牌才会生效", True, TEXT)
         screen.blit(title, title.get_rect(center=(box.centerx, box.y + 40)))
 
-        q = self.quiz
         expr = self.F_BIG.render("%d %s %d =" % (q["a"], q["op"], q["b"]),
                                  True, ACCENT)
         expr_y = box.y + 100
@@ -1004,30 +1300,74 @@ class BattleScene:
         line_x1 = line_x0 + BLANK_W
         line_y = expr_y + 34
         pygame.draw.line(screen, ACCENT, (line_x0, line_y), (line_x1, line_y), 3)
+        self._draw_typed(screen, q["input"], line_x0, line_x1, line_y,
+                         ACCENT, t_ms)
 
-        typed = q["input"]
-        cx_mid = line_x0 + BLANK_W // 2
-        if typed:
-            tt = self.F_BIG.render(typed, True, TEXT)
-            screen.blit(tt, tt.get_rect(midbottom=(cx_mid, line_y - 4)))
-            if (t_ms // 500) % 2 == 0:
-                cur_x = cx_mid + tt.get_width() // 2 + 8
-                pygame.draw.line(screen, ACCENT, (cur_x, line_y - 40),
-                                 (cur_x, line_y - 4), 3)
-        else:
-            if (t_ms // 500) % 2 == 0:
-                pygame.draw.line(screen, ACCENT, (cx_mid, line_y - 40),
-                                 (cx_mid, line_y - 4), 3)
-
-        hover = self.BTN_SUBMIT.collidepoint(mouse)
-        col = (20, 78, 135) if hover else ACCENT
-        pygame.draw.rect(screen, col, self.BTN_SUBMIT, border_radius=10)
-        sb = self.F_MID.render("提交", True, (255, 255, 255))
-        screen.blit(sb, sb.get_rect(center=self.BTN_SUBMIT.center))
-
+        self._draw_submit(screen, mouse, q, ACCENT)
         hint = self.F_TINY.render("直接敲数字键输入，回车提交，退格删除",
                                   True, TEXT_MUTE)
         screen.blit(hint, hint.get_rect(center=(box.centerx, box.bottom - 22)))
+
+    def _draw_figure_quiz(self, screen, mouse, t_ms, q, kind):
+        """图形题（组合出的面积题 / 单出图形卡的认图形题）。
+
+        两种题的排版共用一个大框：**上面是图形，下面是题面**。
+        图形就画在框里，玩家不用在脑子里拼图 —— 这是本题型存在的意义。
+        """
+        box = self.QUIZ_BOX_FIG
+        col = GREEN                      # 图形卡的主色
+        pygame.draw.rect(screen, PANEL, box, border_radius=16)
+        pygame.draw.rect(screen, col, box, 3, border_radius=16)
+
+        title_txt = ("算对这个面积，两张卡一起生效" if kind == "area"
+                     else "认出这个图形，卡牌才会生效")
+        title = self.F_MID.render(title_txt, True, TEXT)
+        screen.blit(title, title.get_rect(center=(box.centerx, box.y + 36)))
+
+        if kind == "area":
+            art_shapes.draw_shape_figure(screen, q["shape"],
+                                         (box.centerx, box.y + 176), 170, col,
+                                         q["dims"])
+            l1 = self.F_SML.render("求这个%s的面积" % art_shapes.shape_cn(q["shape"]),
+                                   True, TEXT)
+            screen.blit(l1, l1.get_rect(center=(box.centerx, box.y + 280)))
+            l2 = self.F_SML.render(
+                "%s　　面积 = %s" % (shape_dims_text(q["shape"], q["dims"]),
+                                    art_shapes.shape_formula(q["shape"])),
+                True, TEXT_MUTE)
+            screen.blit(l2, l2.get_rect(center=(box.centerx, box.y + 308)))
+
+            # 输入行：S = ____  ＋ 提交（挤在同一行，纵向空间留给图形）
+            btn = q.get("submit_rect", self.BTN_SUBMIT)
+            line_x1 = btn.x - 26
+            line_x0 = line_x1 - 130
+            lab = self.F_MID.render("S =", True, col)
+            screen.blit(lab, lab.get_rect(midright=(line_x0 - 10, btn.centery)))
+            line_y = btn.centery + 18
+            pygame.draw.line(screen, col, (line_x0, line_y), (line_x1, line_y), 3)
+            self._draw_typed(screen, q["input"], line_x0, line_x1, line_y,
+                             col, t_ms)
+            self._draw_submit(screen, mouse, q, col)
+            hint = self.F_TINY.render("敲数字键输入面积，回车提交，退格删除",
+                                      True, TEXT_MUTE)
+        else:
+            art_shapes.draw_shape_figure(screen, q["shape"],
+                                         (box.centerx, box.y + 160), 140, col,
+                                         None, False)
+            for i, r in enumerate(q["option_rects"]):
+                picked = (q.get("pick") == i)
+                hover = r.collidepoint(mouse)
+                bg = col if picked else (GREEN_SOFT if hover else CARD_FACE)
+                pygame.draw.rect(screen, bg, r, border_radius=12)
+                pygame.draw.rect(screen, col, r, 3 if picked else 2,
+                                 border_radius=12)
+                txt = self.F_MID.render("%d. %s" % (i + 1, q["options"][i]),
+                                        True, (255, 255, 255) if picked else TEXT)
+                screen.blit(txt, txt.get_rect(center=r.center))
+            self._draw_submit(screen, mouse, q, col)
+            hint = self.F_TINY.render("点选项或按 1-4 选择，回车提交",
+                                      True, TEXT_MUTE)
+        screen.blit(hint, hint.get_rect(center=(box.centerx, box.bottom - 20)))
 
     def draw_result(self, screen):
         veil = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)

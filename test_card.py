@@ -9,7 +9,10 @@
 数学机制：
   - 数字卡：打出时需要做算术题，算对才生效
   - 图形卡：提供格挡或特殊效果
-  - 数形结合：数字卡 + 图形卡可以合成更强效果
+
+注意：这里是**早期原型**，只有上面两条。正式版（main.py / BattleScene）
+多了「数形结合」组合：数字卡 + 图形卡一起打出 -> 算图形面积，
+图形卡单独打出 -> 认图形名称。原型不跟这套规则，别拿它当参照。
 """
 
 import math
@@ -412,7 +415,9 @@ while running:
 
                         if c.ctype == "number":
                             game.pending_number = c
-                            game.combo_hint = f"已选数字 {c.value}，可再点图形卡组合"
+                            # 原型里没有组合机制（组合在 main.py 的 BattleScene），
+                            # 这里就给个不骗人的提示，别再写「可再点图形卡组合」。
+                            game.combo_hint = f"已选数字 {c.value}（原型无组合机制）"
                         else:
                             game.combo_hint = ""
                         break

@@ -66,6 +66,16 @@ def _line(screen, col, a, b, w):
 # 卡牌图案
 # ---------------------------------------------------------------------------
 
+def base_card_name(name):
+    """剥掉强化后缀 —— 「三角盾+」的图案要用「三角盾」那一份。
+
+    强化会把卡名加个加号，如果查表前不剥掉，玩家花掉一次强化机会之后
+    卡面图案反而变成问号圆盘（图案"没了"）。所以查 _ICONS / CARD_SHAPE
+    之前一律先过这里。
+    """
+    return name[:-1] if name.endswith("+") else name
+
+
 def draw_card_icon(screen, name, center, size, col):
     """按卡名在 center 处画一个 size×size 的图案。
 
@@ -74,7 +84,7 @@ def draw_card_icon(screen, name, center, size, col):
     """
     cx, cy = int(center[0]), int(center[1])
     s = float(size)
-    drawer = _ICONS.get(name)
+    drawer = _ICONS.get(base_card_name(name))
     if drawer is None:
         _icon_fallback(screen, cx, cy, s, col)
         return False
@@ -221,6 +231,23 @@ def _icon_contradiction(screen, cx, cy, s, col):
                        int(max(2, s * 0.055)))
 
 
+def _icon_sqrt(screen, cx, cy, s, col):
+    """开方 —— 一个根号（√），里面压着被开方的那条横线。
+
+    商店卡池里有「开方」这张数字卡，之前没配图案，卡面一直是问号圆盘。
+    """
+    w = max(2, s * 0.08)
+    pts = [(int(cx - s * 0.40), int(cy + s * 0.02)),
+           (int(cx - s * 0.22), int(cy + s * 0.34)),
+           (int(cx - s * 0.02), int(cy - s * 0.36)),
+           (int(cx + s * 0.40), int(cy - s * 0.36))]
+    pygame.draw.lines(screen, col, False, pts, int(w))
+    # 根号内的被开方数（横线），让它读起来是「√ 一个数」
+    _line(screen, _shade(col, 0.25),
+          (int(cx + s * 0.04), int(cy - s * 0.12)),
+          (int(cx + s * 0.36), int(cy - s * 0.12)), max(2, s * 0.06))
+
+
 def _icon_substitute(screen, cx, cy, s, col):
     """换元 —— 方块「换成」圆：左方 + 箭头 + 右圆。"""
     w = max(2, s * 0.075)
@@ -274,6 +301,7 @@ _ICONS = {
     "凑十":   _icon_ten,
     "平方":   _icon_square,
     "未知数": _icon_unknown,
+    "开方":   _icon_sqrt,
     "三角盾": _icon_triangle_shield,
     "方阵":   _icon_grid,
     "镜像":   _icon_mirror,
@@ -441,3 +469,247 @@ def _enemy_boss(screen, cx, cy, r, st, t_ms):
     pygame.draw.circle(screen, st["main"], (cx, cy), int(r * 0.17),
                        max(2, int(r * 0.05)))
     pygame.draw.circle(screen, st["soft"], (cx, cy), int(r * 0.065))
+
+
+# ---------------------------------------------------------------------------
+# 题目图形（组合出牌的「算面积」题 / 单出图形卡的「认图形名称」题）
+# ---------------------------------------------------------------------------
+#: 图形卡 -> 几何形状 id。
+#  每张图形卡配一种**有面积公式**的基本图形，和卡名的数学含义对得上：
+#    三角盾（盾）   -> 三角形
+#    方阵（阵列）   -> 正方形
+#    镜像（对称）   -> 长方形
+#    反证（⊥ 直角） -> 平行四边形
+#    换元（替换）   -> 梯形
+#    归零（∅ 圆）   -> 圆
+#  这里加了新卡却没配形状的话，shape_of_card() 返回 None，
+#  调用方会退成「正方形」出题（不会崩，只是题目潦草一点）。
+CARD_SHAPE = {
+    "三角盾": "triangle",
+    "方阵":   "square",
+    "镜像":   "rectangle",
+    "反证":   "parallelogram",
+    "换元":   "trapezoid",
+    "归零":   "circle",
+}
+
+#: 形状 id -> 中文名（认图形题的正确选项就是它）
+SHAPE_CN = {
+    "triangle":      "三角形",
+    "square":        "正方形",
+    "rectangle":     "长方形",
+    "parallelogram": "平行四边形",
+    "trapezoid":     "梯形",
+    "circle":        "圆",
+}
+
+#: 形状 id -> 面积公式（写在题面上，玩家不用猜公式）
+SHAPE_FORMULA = {
+    "triangle":      "底 × 高 ÷ 2",
+    "square":        "边长 × 边长",
+    "rectangle":     "长 × 宽",
+    "parallelogram": "底 × 高",
+    "trapezoid":     "（上底 + 下底）× 高 ÷ 2",
+    "circle":        "半径 × 半径 × 3（π 取 3）",
+}
+
+#: 认图形题的备选名（全部形状名，出题时从这里挑干扰项）
+SHAPE_NAMES = list(SHAPE_CN.values())
+
+
+def shape_of_card(name):
+    """图形卡 -> 形状 id。没配到的卡返回 None（调用方兜底）。"""
+    return CARD_SHAPE.get(base_card_name(name))
+
+
+def shape_cn(shape):
+    return SHAPE_CN.get(shape, "图形")
+
+
+def shape_formula(shape):
+    return SHAPE_FORMULA.get(shape, "")
+
+
+def _clamp(v, lo, hi):
+    return lo if v < lo else (hi if v > hi else v)
+
+
+def _dashed_line(screen, col, a, b, w, seg=9):
+    """虚线：画「高」这类辅助线用，和实线的边区分开，一眼知道不是边。"""
+    ax, ay = float(a[0]), float(a[1])
+    bx, by = float(b[0]), float(b[1])
+    length = math.hypot(bx - ax, by - ay)
+    if length <= 0.5:
+        return
+    ux, uy = (bx - ax) / length, (by - ay) / length
+    t = 0.0
+    while t < length:
+        t2 = min(t + seg, length)
+        pygame.draw.line(screen, col,
+                         (int(ax + ux * t), int(ay + uy * t)),
+                         (int(ax + ux * t2), int(ay + uy * t2)), max(1, int(w)))
+        t += seg * 1.9
+
+
+def _dim_label(screen, text, pos, col, fs):
+    """尺寸标注：白底小牌 + 深色数字 —— 压在图形线上也读得清。"""
+    f = _font(max(12, int(fs)))
+    t = f.render(text, True, _shade(col, -0.25))
+    r = t.get_rect(center=(int(pos[0]), int(pos[1])))
+    pygame.draw.rect(screen, (255, 255, 255), r.inflate(9, 3), border_radius=4)
+    screen.blit(t, r)
+
+
+def _num(v):
+    """标注用的数字：4.0 -> "4"，3.5 -> "3.5"。"""
+    return "%g" % v
+
+
+def draw_shape_figure(screen, shape, center, size, col, dims=None, labels=True):
+    """画出「题目里的那个图形」。
+
+    参数：
+      shape   形状 id（见 SHAPE_CN）
+      center  图形中心点
+      size    可用方形边长（和 draw_card_icon 同一套约定，内部按比例算）
+      col     线色（图形卡用绿，数字卡用蓝）
+      dims    尺寸字典，例如 {"base": 6, "height": 4}。给了尺寸就**按真实
+              比例**画（底 6 高 4 看着确实是扁的），而不是画个"示意图形" ——
+              面积题里图形比例不对，玩家一眼就觉得题目糊弄。
+      labels  是否标注尺寸数字（认图形名称的题不需要标，标了反而像送答案）
+    返回 True 表示画了专属图形，False 表示走了兜底。
+    """
+    cx, cy = int(center[0]), int(center[1])
+    s = float(size)
+    col = tuple(col[:3])
+    fill = _shade(col, 0.88)
+    w = max(2, s * 0.055)
+    fs = max(13, s * 0.105)
+    dims = dims or {}
+    show = bool(labels and dims)
+    fn = _FIGURES.get(shape)
+    if fn is None:
+        _icon_fallback(screen, cx, cy, s, col)
+        return False
+    fn(screen, cx, cy, s, col, fill, w, dims, show, fs)
+    return True
+
+
+def _fig_triangle(screen, cx, cy, s, col, fill, w, dims, show, fs):
+    """三角形：底边在下、顶点在上；高是虚线的垂线。"""
+    base = float(dims.get("base", 6)) or 6.0
+    height = float(dims.get("height", 4)) or 4.0
+    bw = s * 0.84
+    bh = _clamp(bw * height / base, s * 0.30, s * 0.78)
+    top = (cx, cy - bh / 2.0)
+    bl = (cx - bw / 2.0, cy + bh / 2.0)
+    br = (cx + bw / 2.0, cy + bh / 2.0)
+    pts = [(int(top[0]), int(top[1])), (int(bl[0]), int(bl[1])),
+           (int(br[0]), int(br[1]))]
+    pygame.draw.polygon(screen, fill, pts)
+    pygame.draw.polygon(screen, col, pts, int(w))
+    if show:
+        _dashed_line(screen, _shade(col, 0.2), top, (cx, bl[1]), max(1, w * 0.6))
+        _dim_label(screen, _num(height), (cx + s * 0.10, cy + bh * 0.14), col, fs)
+        _dim_label(screen, _num(base), (cx + bw * 0.26, bl[1] + fs * 1.05), col, fs)
+
+
+def _fig_square(screen, cx, cy, s, col, fill, w, dims, show, fs):
+    """正方形。"""
+    side = float(dims.get("side", 5)) or 5.0
+    half = s * 0.34
+    r = pygame.Rect(int(cx - half), int(cy - half), int(half * 2), int(half * 2))
+    pygame.draw.rect(screen, fill, r)
+    pygame.draw.rect(screen, col, r, int(w))
+    if show:
+        _dim_label(screen, _num(side), (cx, r.bottom + fs * 1.1), col, fs)
+
+
+def _fig_rectangle(screen, cx, cy, s, col, fill, w, dims, show, fs):
+    """长方形：长边在下（标长），右竖边外侧标宽。"""
+    lw = float(dims.get("w", 6)) or 6.0
+    lh = float(dims.get("h", 4)) or 4.0
+    bw = s * 0.86
+    bh = _clamp(bw * lh / lw, s * 0.26, s * 0.72)
+    r = pygame.Rect(0, 0, int(bw), int(bh))
+    r.center = (cx, cy)
+    pygame.draw.rect(screen, fill, r)
+    pygame.draw.rect(screen, col, r, int(w))
+    if show:
+        _dim_label(screen, _num(lw), (cx, r.bottom + fs * 1.1), col, fs)
+        _dim_label(screen, _num(lh), (r.right + fs * 1.4, cy), col, fs)
+
+
+def _fig_parallelogram(screen, cx, cy, s, col, fill, w, dims, show, fs):
+    """平行四边形：斜一格；高仍是从上底顶点到下底的垂线。"""
+    base = float(dims.get("base", 6)) or 6.0
+    height = float(dims.get("height", 4)) or 4.0
+    bw = s * 0.78
+    bh = _clamp(bw * height / base, s * 0.28, s * 0.72)
+    skew = bw * 0.26
+    tl = (cx - bw / 2.0, cy - bh / 2.0)
+    tr = (cx + bw / 2.0, cy - bh / 2.0)
+    br = (cx + bw / 2.0 + skew, cy + bh / 2.0)
+    bl = (cx - bw / 2.0 + skew, cy + bh / 2.0)
+    pts = [(int(p[0]), int(p[1])) for p in (tl, tr, br, bl)]
+    pygame.draw.polygon(screen, fill, pts)
+    pygame.draw.polygon(screen, col, pts, int(w))
+    if show:
+        foot = (bl[0], bl[1])
+        _dashed_line(screen, _shade(col, 0.2), tl, foot, max(1, w * 0.6))
+        _dim_label(screen, _num(height),
+                   ((tl[0] + foot[0]) / 2.0 + fs * 1.0, cy + bh * 0.10),
+                   col, fs)
+        _dim_label(screen, _num(base), (bl[0] + bw / 2.0, bl[1] + fs * 1.05),
+                   col, fs)
+
+
+def _fig_trapezoid(screen, cx, cy, s, col, fill, w, dims, show, fs):
+    """梯形：上底短、下底长；高同样是虚线。"""
+    top_a = float(dims.get("top", 4)) or 4.0
+    bot_b = float(dims.get("bottom", 6)) or 6.0
+    height = float(dims.get("height", 4)) or 4.0
+    bw = s * 0.86
+    tw = _clamp(bw * top_a / bot_b, bw * 0.24, bw * 0.92)
+    bh = _clamp(bw * height / bot_b, s * 0.26, s * 0.70)
+    tl = (cx - tw / 2.0, cy - bh / 2.0)
+    tr = (cx + tw / 2.0, cy - bh / 2.0)
+    br = (cx + bw / 2.0, cy + bh / 2.0)
+    bl = (cx - bw / 2.0, cy + bh / 2.0)
+    pts = [(int(p[0]), int(p[1])) for p in (tl, tr, br, bl)]
+    pygame.draw.polygon(screen, fill, pts)
+    pygame.draw.polygon(screen, col, pts, int(w))
+    if show:
+        _dashed_line(screen, _shade(col, 0.2), tl, (tl[0], bl[1]),
+                     max(1, w * 0.6))
+        _dim_label(screen, _num(height), (tl[0] + fs * 0.9, cy + bh * 0.10),
+                   col, fs)
+        _dim_label(screen, _num(top_a), (cx, tl[1] - fs * 1.05), col, fs)
+        _dim_label(screen, _num(bot_b), (cx, bl[1] + fs * 1.05), col, fs)
+
+
+def _fig_circle(screen, cx, cy, s, col, fill, w, dims, show, fs):
+    """圆：画一条半径线并标出半径（面积题里圆只给半径，π 取 3）。"""
+    rad = float(dims.get("r", 4)) or 4.0
+    rp = s * 0.34
+    pygame.draw.circle(screen, fill, (cx, cy), int(rp))
+    pygame.draw.circle(screen, col, (cx, cy), int(rp), int(w))
+    ang = math.radians(-38)
+    end = (cx + rp * math.cos(ang), cy + rp * math.sin(ang))
+    _line(screen, _shade(col, 0.1), (cx, cy), (int(end[0]), int(end[1])),
+          max(1, w * 0.7))
+    pygame.draw.circle(screen, _shade(col, 0.1), (cx, cy), max(2, int(w * 0.9)))
+    if show:
+        _dim_label(screen, "r = " + _num(rad),
+                   ((cx + end[0]) / 2.0 + fs * 0.4,
+                    (cy + end[1]) / 2.0 - fs * 1.15), col, fs)
+
+
+_FIGURES = {
+    "triangle":      _fig_triangle,
+    "square":        _fig_square,
+    "rectangle":     _fig_rectangle,
+    "parallelogram": _fig_parallelogram,
+    "trapezoid":     _fig_trapezoid,
+    "circle":        _fig_circle,
+}
