@@ -347,6 +347,10 @@ ENEMY_STYLE = {
                "soft": (236, 216, 196), "stone": (190, 172, 158)},
     "boss":   {"main": (96, 80, 156), "dark": (58, 48, 104),
                "soft": (216, 212, 236), "stone": (168, 162, 186)},
+    # 第一层层主「正方体·三阶」：用塔基那一层的主题蓝，
+    # 和地图上这一层的配色对得上（玩家进战斗时不会觉得换了地方）
+    "boss_square": {"main": (54, 116, 176), "dark": (32, 74, 122),
+                    "soft": (214, 230, 246), "stone": (176, 198, 220)},
 }
 
 
@@ -357,10 +361,11 @@ def enemy_style(kind):
 def draw_enemy(screen, kind, center, r, t_ms=0):
     """按敌人档次画形象。r 是"体型半径"，一切按它比例缩放。
 
-    三档各有各的视觉母题，和它们的名字对应：
-        battle 几何魔像   —— 多边形一层层堆起来的石像
-        elite  方程组·三元 —— 三个圆互相连线牵制，解一个才能动下一个
-        boss   不可解之影  —— 一个收不拢的漩涡，中心是自己的矛盾
+    四档各有各的视觉母题，和它们的名字对应：
+        battle      几何魔像     —— 多边形一层层堆起来的石像
+        elite       方程组·三元   —— 三个圆互相连线牵制，解一个才能动下一个
+        boss        不可解之影    —— 一个收不拢的漩涡，中心是自己的矛盾
+        boss_square 正方体·三阶   —— 三个正方形共用一条底边，边长 1:2:3
     """
     cx, cy = int(center[0]), int(center[1])
     r = float(r)
@@ -369,6 +374,8 @@ def draw_enemy(screen, kind, center, r, t_ms=0):
         _enemy_elite(screen, cx, cy, r, st, t_ms)
     elif kind == "boss":
         _enemy_boss(screen, cx, cy, r, st, t_ms)
+    elif kind == "boss_square":
+        _enemy_square_boss(screen, cx, cy, r, st, t_ms)
     else:
         _enemy_golem(screen, cx, cy, r, st, t_ms)
 
@@ -493,6 +500,39 @@ def _enemy_boss(screen, cx, cy, r, st, t_ms):
     pygame.draw.circle(screen, st["main"], (cx, cy), int(r * 0.17),
                        max(2, int(r * 0.05)))
     pygame.draw.circle(screen, st["soft"], (cx, cy), int(r * 0.065))
+
+
+def _enemy_square_boss(screen, cx, cy, r, st, t_ms):
+    """正方体·三阶：三个正方形**共用同一条底边**，边长 1 : 2 : 3。
+
+    形象就是它的攻击方式。三块方砖的边长是 1、2、3，面积正好是 1、4、9 ——
+    「阶」这个字的两种意思（方砖的阶层 / 乘方的次数）在同一个图形里重合：
+    它蓄一个数、打出那个数的平方（见 battle_scene.SQUARE_BOSS_CHARGE）。
+
+    刻意**不画成立方体的立体投影**：斜投影在这么小的尺寸下会糊成一团，
+    而「正方形一层层长大」既看得清，也正好是玩家要在这一层学会的那件事。
+    """
+    breathe = 1.0 + 0.02 * math.sin(t_ms / 900.0) if t_ms else 1.0
+    foot = cy + r                      # 底边落在和别的敌人同一条地面线上
+
+    # 从大到小叠：边长比例 1 : 2 : 3（= 面积 1 : 4 : 9）
+    layers = ((3, 0.92, st["stone"]), (2, 0.62, st["soft"]), (1, 0.33, st["main"]))
+    for order, frac, fill in layers:
+        side = 2 * r * frac * breathe
+        box = pygame.Rect(0, 0, int(side), int(side))
+        box.centerx = cx
+        box.bottom = int(foot)         # 三条底边对齐 —— 像一摞方砖立在地面上
+        pygame.draw.rect(screen, fill, box, border_radius=int(r * 0.06))
+        pygame.draw.rect(screen, st["dark"], box,
+                         max(2, int(r * 0.05)), border_radius=int(r * 0.06))
+        # 阶数用小方点标在左上角内缘，一眼看得出「这是第几阶」
+        dot = max(2, int(r * 0.045))
+        pygame.draw.circle(screen, st["dark"],
+                           (box.left + dot * 3, box.top + dot * 3), dot)
+
+    # 顶阶中心的一点高光：让最里面那块砖「亮起来」，视线有落点
+    pygame.draw.circle(screen, st["soft"], (cx, int(foot - r * 0.33)),
+                       max(3, int(r * 0.1)))
 
 
 # ---------------------------------------------------------------------------

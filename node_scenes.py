@@ -33,7 +33,7 @@ import sfx
 # 卡牌类型的三件套（数字/图形/运算 的主色、浅底、标签）也统一从那里取，
 # 免得战斗、牌组、商店三处各写一套 `number if ... else shape`。
 from player import (RELIC_POOL, roll_unowned_relic,   # noqa: F401
-                    NUMBER_SPECS, SQUARE_SPEC,
+                    NUMBER_SPECS, SQUARE_SPEC, Card,
                     card_color, card_soft, type_label)
 
 # ==================== 配色（与地图/战斗统一）====================
@@ -61,7 +61,8 @@ WIDTH, HEIGHT = 1280, 720
 # 数字牌一个个卖：牌组里想要哪个数字就买哪个数字（数字牌的伤害就是它
 # 自己，9 号牌比 1 号牌值钱得多）。0 号牌不进商店 —— 它只值一张手牌，
 # 没人会花金币买。
-# 「平方」也在池子里：它是唯一一张能把数字变成平方的牌（见 battle_scene）。
+# 「平方」也在池子里：它是唯一一张能把数字变成平方的牌（见 battle_scene），
+# 但**要等第一层层主被打掉之后才进货**，见下面的 shop_pool()。
 CARD_POOL = NUMBER_SPECS[1:] + [
     SQUARE_SPEC,
     ("三角盾", "shape", 0, "获得 6 点格挡",   1, {"block": 6}),
@@ -73,6 +74,19 @@ CARD_POOL = NUMBER_SPECS[1:] + [
     ("换元",   "shape", 0, "抽 1 张牌并造成 4 点伤害", 1,
      {"draw": 1, "dmg": 4}),
 ]
+
+
+def shop_pool(player):
+    """这家商店能进的货。
+
+    平方是**第一层层主的战利品**（player.unlock_square），解锁之前不进池子 ——
+    否则玩家在第一层的柜台上就能花金币买到它，「打完层主才拿到」这条
+    设计线等于白设，第一层「只能靠 0~9 慢慢磨」的难度也就没了。
+    解锁之后照常卖，让后面两层能补第二、第三张。
+    """
+    if player.has_square():
+        return list(CARD_POOL)
+    return [c for c in CARD_POOL if c[0] != SQUARE_SPEC[0]]
 
 #: 遗物池已搬到 player.py（见那边的 RELIC_POOL），这里只留名字导入。
 
@@ -409,7 +423,10 @@ class ShopPanel(Panel):
     def __init__(self, player):
         super().__init__(player)
         self.stock = self.roll_stock()
-        self.removal_price = 60
+        # 删牌**一次商店只能删一张**：删完这家店就不再提供这项服务。
+        # 配合「每删一张就涨一档价」（player.removal_price），
+        # 删牌才不会变成「金币全部倒进去把牌组清空」。
+        self.removed_here = False
         self.msg = "点击商品购买"
         self.mode = "shop"      # shop / pick_remove
 
@@ -430,8 +447,18 @@ class ShopPanel(Panel):
         self.btn_back = pygame.Rect(32, HEIGHT - 74, 130, 42)
         self.card_rects = []
 
+    @property
+    def removal_price(self):
+        """本店删牌的价钱 —— 直接问玩家（它记着删过几张，见 player.removal_price）。
+
+        做成属性而不是 __init__ 里存一份，是因为**删完那一张之后价钱就变了**：
+        存快照的话，同一家店里按钮上的数字会和实际扣的钱对不上。
+        """
+        return self.player.removal_price()
+
     def roll_stock(self):
-        picks = random.sample(CARD_POOL, 3)
+        # shop_pool 会按「平方解锁了没有」过滤，见那边的注释
+        picks = random.sample(shop_pool(self.player), 3)
         stock = []
         for name, ctype, value, desc, cost, eff in picks:
             # 数字牌按数字加价 —— 9 号牌一次 9 点伤害，跟 1 号牌一个价说不过去
@@ -459,11 +486,22 @@ class ShopPanel(Panel):
                 return None
             for i, c in enumerate(self.cards):
                 if self.card_rects[i].collidepoint(mouse):
-                    self.player.remove_card(c)
-                    self.player.gold -= self.removal_price
-                    self.player.log("从牌库移除了「%s」" % c.name)
+                    paid = self.player.buy_removal(c)
+                    if paid is None:
+                        # 钱在「点开选卡界面」之后可能被花掉过（虽然目前
+                        # 商店里没有别的花销出口，但别把这件事交给运气）
+                        self.msg = "金币不够（还差 %d）" % (
+                            self.removal_price() - self.player.gold)
+                        sfx.play("ui_deny", gap_ms=0)
+                        return None
+                    self.removed_here = True
+                    self.player.log("花 %d 金币从牌库移除了「%s」"
+                                    % (paid, c.name))
                     self.mode = "shop"
-                    self.msg = "已移除「%s」" % c.name
+                    # 把「下次更贵」直接写在结果里，否则玩家只会觉得
+                    # 下一家店的价钱莫名其妙涨了
+                    self.msg = "已移除「%s」　下次删牌要 %d 金币" % (
+                        c.name, self.player.removal_price())
                     sfx.play("coin", gap_ms=0)
                     return None
             return None
@@ -484,6 +522,12 @@ class ShopPanel(Panel):
 
         # ---- 移除卡牌服务 ----
         if self.btn_remove.collidepoint(mouse):
+            if self.removed_here:
+                # 一家店只做一单 —— 这既是难度控制，也让「去哪家店删牌」
+                # 变成一个要规划的取舍，而不是「钱够就一直删」
+                self.msg = "这家店已经用过了（一次只能删一张）"
+                sfx.play("ui_deny", gap_ms=0)
+                return None
             if self.player.gold < self.removal_price:
                 self.msg = "金币不够（还差 %d）" % (self.removal_price - self.player.gold)
                 sfx.play("ui_deny", gap_ms=0)
@@ -496,7 +540,6 @@ class ShopPanel(Panel):
             # 注意：card_rects 必须在这里（点击时）算好，
             # 不能在 draw_pick 里算 —— draw 会在点击之后才跑，
             # 那样第一帧点击就会命中失败
-            self.card_rects = self._layout_remove_cards() if False else self.card_rects
             self.cards = self.player.deck_cards()
             self.card_rects = self._layout_remove_cards()
             self.msg = "选择要移除的卡"
@@ -536,14 +579,20 @@ class ShopPanel(Panel):
             self.draw_item(screen, r, item, mouse)
 
         # 底部：移除服务 + 离开
-        affordable = self.player.gold >= self.removal_price
-        col = RED if affordable else TEXT_FAINT
-        hover = self.btn_remove.collidepoint(mouse) and affordable
-        pygame.draw.rect(screen, RED_SOFT if affordable else (243, 242, 238),
+        # 「这家店删过了」和「钱不够」是两种不同的不可用，按钮上的字要分开写，
+        # 否则玩家会一直以为是自己钱不够，在那儿反复攒钱
+        usable = (not self.removed_here) and self.player.gold >= self.removal_price
+        col = RED if usable else TEXT_FAINT
+        hover = self.btn_remove.collidepoint(mouse) and usable
+        pygame.draw.rect(screen, RED_SOFT if usable else (243, 242, 238),
                          self.btn_remove, border_radius=10)
         pygame.draw.rect(screen, col, self.btn_remove, 3 if hover else 2,
                          border_radius=10)
-        bt = self.F_MID.render("移除一张卡  %d" % self.removal_price, True, col)
+        if self.removed_here:
+            label = "这家店删过了"
+        else:
+            label = "移除一张卡  %d" % self.removal_price
+        bt = self.F_MID.render(label, True, col)
         screen.blit(bt, bt.get_rect(center=self.btn_remove.center))
 
         pygame.draw.rect(screen, PANEL, self.btn_leave, border_radius=10)
@@ -974,9 +1023,18 @@ class SpoilsPanel(Panel):
 
     title = "战利品"
 
-    def __init__(self, player, kind="elite", relics=1, upgrades=1):
+    def __init__(self, player, kind="elite", relics=1, upgrades=1, unlock=None):
+        """unlock：这一战附赠的「新卡解锁」，传一个卡牌 spec
+        (name, ctype, value, desc, cost, effect)。
+
+        目前只有第一层层主会传（送「平方」）。卡**不在这里发** ——
+        发卡是 main.Game 的事（它才知道打的是第几层），本面板只负责
+        把这件事大声告诉玩家。奖励和展示分开，是为了让「谁发的」
+        只有一个地方可查。
+        """
         super().__init__(player)
         self.kind = kind
+        self.unlock = unlock
         self.subtitle = ("层主留下的东西" if kind == "boss"
                          else "精英留下的东西")
         self.upgrade_quota = max(0, int(upgrades))
@@ -1013,13 +1071,24 @@ class SpoilsPanel(Panel):
         self.cards = []
 
         # ---- 阶段 ----
-        if self.relic_name or self.relic_gold:
+        # 顺序：先看新卡（最重要的东西，第一眼就该看到）-> 再看遗物 -> 最后强化
+        if self.unlock:
+            self.stage = "unlock"
+            self.msg = ""
+        elif self.relic_name or self.relic_gold:
             self.stage = "relic"
             self.msg = ""
         else:
             self._enter_upgrade()
 
     # ---------- 阶段流转 ----------
+    def _after_unlock(self):
+        """看完新卡，接着走原来的流程（遗物 -> 强化）。"""
+        if self.relic_name or self.relic_gold:
+            self.stage = "relic"
+        else:
+            self._enter_upgrade()
+
     def _enter_upgrade(self):
         """进「选一张卡强化」阶段；没牌可强化（或没次数）就直接结束。"""
         self.stage = "upgrade"
@@ -1033,6 +1102,11 @@ class SpoilsPanel(Panel):
     # ---------- 事件 ----------
     def handle(self, event, mouse):
         if event.type != pygame.MOUSEBUTTONDOWN or event.button != 1:
+            return None
+
+        if self.stage == "unlock":
+            if self.btn_take.collidepoint(mouse):
+                self._after_unlock()
             return None
 
         if self.stage == "relic":
@@ -1060,10 +1134,47 @@ class SpoilsPanel(Panel):
 
     # ---------- 绘制 ----------
     def draw_body(self, screen, mouse, t):
-        if self.stage == "relic":
+        if self.stage == "unlock":
+            self.draw_unlock(screen, mouse)
+        elif self.stage == "relic":
             self.draw_relic(screen, mouse)
         else:
             self.draw_pick(screen, mouse)
+
+    def draw_unlock(self, screen, mouse):
+        """「新卡到手」：把这张牌本身画出来，而不是只写一行字。
+
+        玩家刚被层主用 n² 打过两下，这里让他**看见**那张「平方」牌 ——
+        牌面、说明、费用一应俱全，下一场战斗就知道该拿它配数字卡。
+        """
+        box = self.result_rect
+        pygame.draw.rect(screen, PANEL, box, border_radius=16)
+        pygame.draw.rect(screen, ACCENT, box, 3, border_radius=16)
+
+        name, ctype, value, desc, cost, effect = self.unlock
+        tt = self.F_BIG.render("新卡到手", True, ACCENT)
+        screen.blit(tt, tt.get_rect(center=(box.centerx, box.y + 44)))
+
+        # 卡面画在左边，说明写在右边
+        card = Card(name, ctype, value, desc, cost, effect)
+        cr = pygame.Rect(box.x + 54, box.y + 84, CARD_W, CARD_H)
+        draw_card_tile(screen, cr, card, False, self.F_SML, self.F_TINY)
+
+        tx = cr.right + 36
+        nm = self.F_BIG.render(name, True, TEXT)
+        screen.blit(nm, (tx, box.y + 84))
+        self.draw_wrapped(screen, desc, self.F_SML, TEXT_MUTE,
+                          tx, box.y + 128, box.right - tx - 40)
+        self.draw_wrapped(
+            screen,
+            "层主就是用它打你的：蓄一个数，下回合打出那个数的平方。",
+            self.F_TINY, TEXT_FAINT, tx, box.y + 178, box.right - tx - 40)
+
+        hover = self.btn_take.collidepoint(mouse)
+        col = (20, 78, 135) if hover else ACCENT
+        pygame.draw.rect(screen, col, self.btn_take, border_radius=10)
+        bt = self.F_MID.render("收下", True, (255, 255, 255))
+        screen.blit(bt, bt.get_rect(center=self.btn_take.center))
 
     def draw_relic(self, screen, mouse):
         box = self.result_rect

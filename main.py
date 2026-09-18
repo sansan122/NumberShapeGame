@@ -161,6 +161,29 @@ class Game:
             self.map.push_log("读档：地图已重新生成，只恢复了状态")
 
     # ==================== 节点派发 ====================
+    def enemy_kwargs(self, ntype):
+        """按**当前层**的配置，算出这一场战斗要传给 BattleScene 的参数。
+
+        三个来源在这里合流：
+          · enemy_scale  塔本身的难度（tower.yaml 每层配一个）
+          · enemy_hp_mult 玩家自己选的代价（路线代价「负债增量」）
+          · 层主的名字 / 血量 / 机制主题（tower.yaml 每层配一个）
+
+        全部用 .get() 兜底：老存档里内嵌的 map_data 是加这些字段之前
+        生成的，没有它们 —— 那种存档要能照常读，不能一进战斗就 KeyError。
+        """
+        floors = (self.map.data or {}).get("floors") or []
+        fl = floors[self.map.floor_index] if floors else {}
+        kw = {"enemy_scale": float(fl.get("enemy_scale", 1.0)),
+              "enemy_hp_mult": getattr(self.map, "enemy_hp_mult", 1.0)}
+        if ntype == "boss":
+            # 层主用这一层自己的名字和血量（以前三层都叫「不可解之影」、
+            # 血量一律 120，和地图上写的「层主：正方体·三阶」对不上）
+            kw["enemy_name"] = fl.get("boss")
+            kw["enemy_hp"] = fl.get("boss_hp")
+            kw["boss_theme"] = fl.get("boss_theme")
+        return kw
+
     def enter_node(self, node):
         """点击一个节点：先移动过去，再进入它的内容。"""
         nid = node["id"]
@@ -178,10 +201,10 @@ class Game:
         sfx.play("node_move", gap_ms=0)
 
         if ntype in BATTLE_TYPES:
-            mult = getattr(self.map, "enemy_hp_mult", 1.0)
-            self.battle = BattleScene(self.player, ntype, mult)
+            self.battle = BattleScene(self.player, ntype,
+                                      **self.enemy_kwargs(ntype))
             self.mode = "battle"
-            self.flash("遭遇 %s！" % ENEMY_KINDS[ntype]["name"])
+            self.flash("遭遇 %s！" % self.battle.e_name)
             # 两下战鼓。压在 node_move 之后 0.15 秒，听感上是
             # 「走过去 → 抬头看见敌人」，而不是两件事同时发生。
             sfx.play_after("battle_start", 0.15)
@@ -391,6 +414,7 @@ class Game:
         精英 / 层主按 ENEMY_KINDS 里的配置发遗物和强化次数；
         同时把玩家身上挂着的 pending_upgrades 一起兑现 ——
         路线代价「开区间」承诺过「战后额外获得 1 次强化」。
+        第一层层主额外解锁「平方」卡（player.SQUARE_UNLOCK_FLOOR）。
 
         有东西可发就开战利品面板。走的是 mode="node" 那条路，
         pending_node 还留着，面板选完会自己调 after_node()，
@@ -402,12 +426,23 @@ class Game:
         upgrades = cfg.get("upgrade", 0) + self.player.pending_upgrades
         self.player.pending_upgrades = 0
 
-        if relics <= 0 and upgrades <= 0:
+        # ---- 平方卡：打穿第一层层主才解锁 ----
+        # 这里**立刻**把卡塞进牌库，而不是等玩家在面板上点「收下」：
+        # 中间关掉游戏 / 直接重开也不会把这张牌吞掉。面板只负责
+        # 把这件事大声讲出来（见 SpoilsPanel.draw_unlock）。
+        unlock = None
+        if (kind == "boss" and self.map.floor_index == P.SQUARE_UNLOCK_FLOOR
+                and not self.player.has_square()):
+            self.player.unlock_square()
+            unlock = P.SQUARE_SPEC
+            self.flash("从层主身上拆下了「平方」！", 4)
+
+        if relics <= 0 and upgrades <= 0 and unlock is None:
             self.after_node()
             return
 
         panel = NS.SpoilsPanel(self.player, kind, relics=relics,
-                               upgrades=upgrades)
+                               upgrades=upgrades, unlock=unlock)
         if panel.done:
             # 面板自己判断出「遗物集齐、也没牌可强化」，别开一个空面板
             self.after_node()

@@ -128,13 +128,21 @@ NUMBER_SPECS = _number_specs()
 #: 出题时先给两个示例（2² = 2 × 2 = 4 …），再问「这个数的平方是几」；
 #: 打出的伤害就是那个平方（n²）。这是唯一一张「自己没伤害」的牌 ——
 #: 它是一台乘方器，不是子弹。
+#:
+#: **不在初始牌组里**：它是打穿第一层层主（正方体·三阶）之后才拿到的
+#: 战利品。第一层没有它，玩家只能用 0~9 的加法慢慢磨；拿到它之后，
+#: 9 号牌一发 81 点 —— 这一前一后就是第一层与后两层难度曲线的分水岭。
+#: 所以「什么时候解锁平方」直接决定了整局的节奏，别随手改回去。
 SQUARE_SPEC = ("平方", "op", 0, "配数字卡：伤害＝数字²", 2, {})
 
+#: 平方卡的解锁条件：第几层（0 基）的层主被击败后发放。
+SQUARE_UNLOCK_FLOOR = 0
 
-# 初始牌组 = 数字牌 0~9（十张）+ 各角色自己的形 / 运算卡。
+
+# 初始牌组 = 数字牌 0~9（十张）+ 各角色自己的形卡。
 # 每项会被 clone 成独立实例。
+# 注意这里**没有平方** —— 它要靠打掉第一层层主换来（见 SQUARE_SPEC）。
 STARTER_DECK = NUMBER_SPECS + [
-    SQUARE_SPEC,
     ("三角盾", "shape", 0, "获得 6 点格挡", 1, {"block": 6}),
     ("三角盾", "shape", 0, "获得 6 点格挡", 1, {"block": 6}),
     ("方阵",   "shape", 0, "获得 9 点格挡", 2, {"block": 9}),
@@ -167,8 +175,9 @@ CHARACTERS = [
         "hp": 80,
         "gold": 60,
         "theme": "数字卡强化 —— 伤害直接、节奏快",
-        "desc": "以数字为刃的基础职。起手就带「平方」，数字与乘方配得最顺，"
-                "前期清怪最稳；但缺防线，被压血时容易翻车。",
+        "desc": "以数字为刃的基础职。起手牌组最精简，清怪最稳，"
+                "前期靠「直感」每回合白赚 1 点伤害；但缺防线，"
+                "被压血时容易翻车。拿到「平方」后爆发最猛。",
         "deck": None,
         "trait": "【直感】每回合打出的第一张数字卡伤害 +1",
     },
@@ -207,7 +216,6 @@ CHARACTERS = [
         "desc": "以未知数为引的爆发职。生命最低、初始金币最多，"
                 "靠抽牌找关键卡；手顺时能一回合秒掉精英。",
         "deck": NUMBER_SPECS + [
-            SQUARE_SPEC,
             ("三角盾", "shape", 0, "获得 5 点格挡", 1, {"block": 5}),
             ("镜像",   "shape",  0, "抽 2 张牌",     1, {"draw": 2}),
             ("镜像",   "shape",  0, "抽 2 张牌",     1, {"draw": 2}),
@@ -255,6 +263,20 @@ def roll_unowned_relic(player, rng=random):
     return rng.choice(pool)
 
 
+# ==================== 商店删牌的定价 ====================
+# 删牌是牌组质量唯一可靠的提升手段（卡越少，关键牌上手率越高），
+# 所以它**必须越来越贵**，否则金币全部倒进删牌，牌组会缩到只剩几张神卡。
+#
+# 两条规则一起构成约束：
+#   1. 一次商店只能删一张 —— 删完这家店就没了（ShopPanel.removed_here）
+#   2. 每删掉一张，下一次的价钱就涨一档（Player.removals_done 累加）
+#
+# 价格写成「基价 + 档位 × 步长」，方便调；60 / 90 / 120 / 150 …
+# 一局能进的商店本来就不多，涨太快会直接劝退，涨太慢又拦不住堆删牌。
+REMOVAL_BASE = 60
+REMOVAL_STEP = 30
+
+
 class Player:
     """跨场景共享的玩家状态。"""
 
@@ -276,6 +298,14 @@ class Player:
         # 挂起的强化次数：路线代价「开区间」承诺「战后额外获得 1 次强化」，
         # 先记在这里，等下一场战斗打赢了由战利品面板兑现。
         self.pending_upgrades = 0
+        # 历史上删过几张牌 —— 商店拿它定下一次的删牌价（见 REMOVAL_BASE）。
+        # 只记「删过几次」，不记「花了多少钱」：价格是推导出来的，
+        # 记钱的话改一次定价就会和存档里存的钱对不上。
+        self.removals_done = 0
+        # 平方卡解锁了没有：打穿第一层层主那一刻置 True。
+        # 商店卡池靠它决定要不要摆出「平方」——不然第一层的商店
+        # 就能买到它，「打完层主才拿到」这条线就白设了。
+        self.square_unlocked = False
         self.deck = [Card(*c) for c in deck_src]
         self.log_lines = []
 
@@ -300,6 +330,48 @@ class Player:
             self.deck.remove(card)
             return True
         return False
+
+    # ---------- 商店：删牌 ----------
+    def removal_price(self):
+        """下一次删牌要多少钱。
+
+        由「已删掉几张」推出来，不是存档里的独立字段 —— 这样调定价
+        （REMOVAL_BASE / REMOVAL_STEP）对老存档也立刻生效，不用迁移数据。
+        """
+        return REMOVAL_BASE + REMOVAL_STEP * self.removals_done
+
+    def buy_removal(self, card):
+        """付钱删掉一张牌。成功返回实付价格，失败（钱不够 / 卡不在牌库）返回 None。
+
+        扣钱、删卡、计数三件事必须**绑在一起**：拆开写过一次，
+        结果漏了计数，删牌价永远停在第一档。
+        """
+        if card not in self.deck:
+            return None
+        price = self.removal_price()
+        if self.gold < price:
+            return None
+        self.gold -= price
+        self.deck.remove(card)
+        self.removals_done += 1
+        return price
+
+    # ---------- 平方卡解锁 ----------
+    def has_square(self):
+        """牌库里（或已解锁）有没有平方。老存档可能自带一张，两种情况都算有。"""
+        return self.square_unlocked or any(c.name == "平方" for c in self.deck)
+
+    def unlock_square(self):
+        """打穿第一层层主后发平方牌。返回 True 表示这次真的新发了一张。
+
+        已经有一张就不再塞第二张 —— 效果按卡算，两张平方只是纯粹的重复。
+        但**解锁标记照样置 True**，否则商店永远不卖平方。
+        """
+        fresh = not any(c.name == "平方" for c in self.deck)
+        if fresh:
+            self.add_card_to_deck(*SQUARE_SPEC)
+        self.square_unlocked = True
+        return fresh
 
     # ---------- 遗物 ----------
     def add_relic(self, name):
@@ -345,6 +417,8 @@ class Player:
             "gold": self.gold,
             "relics": list(self.relics),
             "pending_upgrades": self.pending_upgrades,
+            "removals_done": self.removals_done,
+            "square_unlocked": self.square_unlocked,
             "deck": [{"name": c.name, "ctype": c.ctype, "value": c.value,
                       "desc": c.desc, "cost": c.cost, "effect": dict(c.effect)}
                      for c in self.deck],
@@ -363,6 +437,11 @@ class Player:
         # 生命要夹在 0..max_hp 之间，防止手改过的存档出现负血 / 超血
         p.hp = max(0, min(int(d.get("hp", p.max_hp)), p.max_hp))
         p.relics = list(d.get("relics", []))
+        # 挂起的强化次数以前**只写不读** —— 「开区间」承诺的那 1 次强化
+        # 在存读档之后就凭空消失了。写进 to_dict 的字段这里必须全部还原。
+        p.pending_upgrades = int(d.get("pending_upgrades", 0))
+        p.removals_done = int(d.get("removals_done", 0))
+        p.square_unlocked = bool(d.get("square_unlocked", False))
         p.deck = []
         for c in d.get("deck", []):
             try:
@@ -371,5 +450,9 @@ class Player:
             except (KeyError, TypeError):
                 # 单张卡坏了就跳过，不要为一张卡丢掉整局
                 continue
+        # 老存档（平方还在初始牌组那会儿）如果自带一张平方，补上解锁标记，
+        # 否则读档后商店永远不卖平方 —— 玩家会以为是 bug。
+        if p.has_square():
+            p.square_unlocked = True
         p.log_lines = []
         return p

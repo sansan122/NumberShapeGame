@@ -92,6 +92,11 @@ def build_in_memory(seed=None):
             "desc": floor["desc"],
             "boss": floor["boss"],
             "boss_hp": floor["boss_hp"],
+            # 层主的机制主题（目前只有 "square"）。没配就是普通的层主。
+            "boss_theme": floor.get("boss_theme"),
+            # 本层敌人的综合强度倍率（第 1 层 1.0，越往上越大）。
+            # 老配置文件里没有这个键 -> 兜 1.0，别让整张地图生成不出来。
+            "enemy_scale": float(floor.get("enemy_scale", 1.0)),
             "theme_color": floor["theme_color"],
             "nodes": nodes,
             "edges": edges,

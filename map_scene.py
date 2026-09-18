@@ -161,6 +161,11 @@ class MapScene:
         self.floor_index = idx
         fl = self.data["floors"][idx]
         self.floor = fl
+        # 「负债增量」罚的是「本层所有敌人血量 +15%」，所以换层必须归位。
+        # 以前这里没有这一行，代价一旦选过就**永久**跟着玩家爬到塔顶 ——
+        # 而它的收益（1 件遗物）只兑现一次，等于越往后越纯亏。
+        # 读档时 main._init_from_save 会用存档里的值覆盖回来，顺序是对的。
+        self.enemy_hp_mult = 1.0
         self.theme = tuple(
             int(fl["theme_color"][i:i + 2], 16) for i in (1, 3, 5)
         )

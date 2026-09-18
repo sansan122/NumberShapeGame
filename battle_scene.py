@@ -204,6 +204,58 @@ ENEMY_KINDS = {
     },
 }
 
+# ==================== 本层难度倍率（enemy_scale）====================
+# 每层在 tower.yaml 里配一个 enemy_scale（第 1 层 1.0，越往上越大），
+# 由 main 从当前层的配置读出来传进来。
+#
+# **生命吃满额、攻击只吃一半**，这是刻意的：
+#   生命涨 = 打得更久 = 多挨几下，这是「难度」的正常来源；
+#   可玩家没有任何稳定的回血手段（只有休整点和商店），
+#   攻击也满额涨的话，第三层一个杂兵三回合就能削掉半管血 ——
+#   那不是难，是「运气不好就死」。
+ENEMY_ATK_GENTLE = 0.5
+
+#: 敌人普通攻击的伤害区间（每次随机取一个）。
+#: 写成常量是为了让「本层倍率怎么放大攻击」只有一份实现可测 ——
+#: 以前这个区间是直接写在 roll_intent 里的 randint(7, 12)。
+ENEMY_ATK_RANGE = (7, 12)
+
+#: 平方主题层主（第一层「正方体·三阶」）的蓄力基数。
+#: 它先蓄一个数、下回合打出那个数的**平方**。玩家在拿到「平方」这张牌
+#: 之前，先被 n² 打两下，就明白那张牌是干什么用的了 —— 这比任何
+#: 文字教程都直接。拿到手的「平方」，本质上就是从它身上拆下来的零件。
+SQUARE_BOSS_CHARGE = 4
+
+
+def scaled_enemy(cfg, hp_mult=1.0, scale=1.0, hp=None):
+    """把基础配置 + 本层倍率，算成这一场真正用的敌人数值。
+
+    单独提成函数是为了**只有这一处**在做倍率运算 —— 以前生命在 __init__
+    里乘一次、攻击在 roll_intent 里又自己拍一次，改倍率必然漏一处。
+
+    hp：显式指定血量（层主用 tower.yaml 的 boss_hp）时，就**不再乘 scale**。
+    每层的层主血量是单独配过的，再乘一遍等于扣两次难度。
+
+    返回的 atk 是个**倍率**，不是伤害值 —— 普通攻击每次在
+    ENEMY_ATK_RANGE 里随机，倍率要乘在那次随机的结果上。
+    """
+    lifemax = cfg["hp"] if hp is None else hp
+    lifemax = int(round(lifemax * hp_mult * (scale if hp is None else 1.0)))
+    atk = 1 + (scale - 1.0) * ENEMY_ATK_GENTLE
+    return {
+        "name": cfg["name"],
+        "hp": max(1, lifemax),
+        "atk": atk,
+        "block": max(1, int(round(8 * atk))),
+        "buff": max(1, int(round(3 * atk))),
+    }
+
+
+def roll_attack(atk_mult):
+    """按本层倍率掷一次普通攻击的伤害。"""
+    lo, hi = ENEMY_ATK_RANGE
+    return random.randint(int(round(lo * atk_mult)), int(round(hi * atk_mult)))
+
 
 def sieved_card(deck):
     """遗物「质数筛」：从牌库里挑出最弱的一张（只读，不改 deck）。
@@ -465,10 +517,25 @@ def shape_dims_text(shape, dims):
 class BattleScene:
     """一场战斗。"""
 
-    def __init__(self, player, enemy_kind="battle", enemy_hp_mult=1.0):
+    def __init__(self, player, enemy_kind="battle", enemy_hp_mult=1.0,
+                 enemy_scale=1.0, enemy_name=None, enemy_hp=None,
+                 boss_theme=None):
+        """enemy_hp_mult：「负债增量」这类路线代价的乘数（玩家自己选的）。
+        enemy_scale    ：本层难度倍率，从 tower.yaml 读（第 1 层 1.0）。
+        enemy_name     ：覆盖显示名（层主用 tower.yaml 每层配的名字）。
+        enemy_hp       ：覆盖血量（层主用 tower.yaml 的 boss_hp）。
+        boss_theme     ：层主的机制主题，"square" = 蓄力后打平方。
+
+        后面这几个全部可选、带默认值，所以老调用方
+        BattleScene(player, kind) 一行都不用改。
+        """
         self.player = player
         self.kind = enemy_kind
         cfg = ENEMY_KINDS.get(enemy_kind, ENEMY_KINDS["battle"])
+        self.boss_theme = boss_theme
+        # 本层倍率算出来的实际数值（生命 / 攻击倍率 / 格挡 / 强化），
+        # 全部从 scaled_enemy 一处出，别在别处再乘一次
+        self.stats = scaled_enemy(cfg, enemy_hp_mult, enemy_scale, enemy_hp)
 
         # ---- 玩家侧 ----
         self.p_max_hp = player.max_hp
@@ -489,13 +556,23 @@ class BattleScene:
         # 解方程者【代入】：每回合抽牌阶段多抽 1 张
         self.draw_bonus = 1 if player.char_id == "solver" else 0
 
+        # 平方主题层主有自己的形象（art_shapes 里按 "boss_square" 找）。
+        # 其余敌人用档次当画法名，保持原来的行为。
+        self.e_art = "boss_square" if boss_theme == "square" else self.kind
         # ---- 敌人侧 ----
-        self.e_name = cfg["name"]
-        self.e_max_hp = int(cfg["hp"] * enemy_hp_mult)
+        self.e_name = enemy_name or cfg["name"]
+        self.e_max_hp = self.stats["hp"]
         self.e_hp = self.e_max_hp
         self.e_block = 0
         self.e_intent = "attack"
         self.e_intent_val = 9
+        # 平方主题层主的蓄力：0 = 没在蓄力。见 roll_intent / enemy_act。
+        self.e_charge = 0
+        # 最近一次蓄下去的那个 n（蓄力时 = 待打出的基数，平方打击时 = 刚打出的基数）。
+        # 它存在的唯一理由是**让「n²」这份文案只有一个来源**：日志、飘字、
+        # 意图框三处都要写「4² = 16」，各自去读 SQUARE_BOSS_CHARGE 的话，
+        # 哪天给别的层主配一个「蓄力 5」，三处就会各说各话。
+        self.e_square_n = 0
         self.reward_gold = cfg["gold"]
 
         # ---- 回合 ----
@@ -1077,36 +1154,60 @@ class BattleScene:
         self.carry_block = self.p_block if self.char_id == "geometer" else 0
         self.phase = "enemy"
 
+    def _enemy_hit(self, dmg, tmpl):
+        """敌人这一下真打到玩家身上：扣格挡、扣血、播反馈、写日志。
+
+        普通攻击和层主的「平方打击」共用这一份 —— 两处各写一遍的话，
+        迟早有一处忘了扣格挡（这个模块以前就栽过：格挡只显示不生效）。
+        tmpl 里的 %d 会被换成**实际掉的血**（扣完格挡之后的）。
+        """
+        actual = max(0, dmg - self.p_block)
+        self.p_block = max(0, self.p_block - dmg)
+        self.p_hp -= actual
+        if actual > 0:
+            self.p_anim.play("hit")    # 真的挨了打 -> 播受击动作
+            self.log.insert(0, tmpl % actual)
+            # 挨打反馈：闷响（比打击音柔和一档）+ 整屏泛红 + 飘字。
+            # 刻意不震屏 —— 屏幕震动是「我打中了」的爽感，被揍也震
+            # 会把这个信号搞混。
+            sfx.play("hurt", gap_ms=0)
+            self.hurt_flash = HURT_LIFE
+            self.pop("−%d" % actual, self.P_X, 248, RED, 26)
+        else:
+            self.log.insert(0, "敌人的攻击被格挡挡下了")
+            sfx.play("hit_block", gap_ms=0)
+            self.pop("挡下了", self.P_X, 248, ACCENT, 24)
+
     def enemy_act(self):
         if self.e_intent == "attack":
-            dmg = self.e_intent_val
-            actual = max(0, dmg - self.p_block)
-            self.p_block = max(0, self.p_block - dmg)
-            self.p_hp -= actual
-            if actual > 0:
-                self.p_anim.play("hit")    # 真的挨了打 -> 播受击动作
-                self.log.insert(0, "敌人攻击，造成 %d 点伤害" % actual)
-                # 挨打反馈：闷响（比打击音柔和一档）+ 整屏泛红 + 飘字。
-                # 刻意不震屏 —— 屏幕震动是「我打中了」的爽感，被揍也震
-                # 会把这个信号搞混。
-                sfx.play("hurt", gap_ms=0)
-                self.hurt_flash = HURT_LIFE
-                self.pop("−%d" % actual, self.P_X, 248, RED, 26)
-            else:
-                self.log.insert(0, "敌人攻击，被格挡挡下了")
-                sfx.play("hit_block", gap_ms=0)
-                self.pop("挡下了", self.P_X, 248, ACCENT, 24)
+            self._enemy_hit(self.e_intent_val, "敌人攻击，造成 %d 点伤害")
+        elif self.e_intent == "square":
+            # 平方主题层主的杀招：这一下的伤害是**蓄力值的平方**。
+            # 日志里把 n² 的算法摊开写 —— 玩家刚被 16 点打过，
+            # 转头就在战利品里拿到「平方」这张牌，一眼就知道怎么用。
+            n = self.e_square_n
+            self._enemy_hit(self.e_intent_val,
+                            "「平方」打击：%d² = %d，造成 %%d 点伤害" % (n, n * n))
+        elif self.e_intent == "charge":
+            # 蓄力回合完全不还手，玩家可以放心all in
+            self.log.insert(0, "层主开始蓄力 —— 下回合 %d² = %d 点伤害"
+                            % (self.e_charge, self.e_charge ** 2))
+            sfx.play("upgrade", vol=0.9, gap_ms=0)
+            self.pop("蓄力 %d" % self.e_charge,
+                     self.E_X + 96, self.E_CY - self.E_R - 60, PURPLE, 24)
         elif self.e_intent == "block":
-            self.e_block += 8
-            self.log.insert(0, "敌人获得 8 点格挡")
+            got = self.stats["block"]
+            self.e_block += got
+            self.log.insert(0, "敌人获得 %d 点格挡" % got)
             sfx.play("shield", gap_ms=0)
-            self.pop("+8 格挡", self.E_X + 96, self.E_CY - self.E_R - 60,
+            self.pop("+%d 格挡" % got, self.E_X + 96, self.E_CY - self.E_R - 60,
                      ACCENT, 22)
         elif self.e_intent == "buff":
-            self.e_intent_val += 3
-            self.log.insert(0, "敌人强化，下次攻击 +3")
+            got = self.stats["buff"]
+            self.e_intent_val += got
+            self.log.insert(0, "敌人强化，下次攻击 +%d" % got)
             sfx.play("upgrade", vol=0.8, gap_ms=0)
-            self.pop("强化 +3", self.E_X + 96, self.E_CY - self.E_R - 60,
+            self.pop("强化 +%d" % got, self.E_X + 96, self.E_CY - self.E_R - 60,
                      PURPLE, 22)
 
         self.check_end()
@@ -1130,14 +1231,39 @@ class BattleScene:
             self.phase = "player"
 
     def roll_intent(self):
+        # 平方主题的层主走自己的脚本（蓄力 -> 平方打击），不掷骰子。
+        # 它的攻击是**可预期**的：玩家看得见「下回合 16 点」，才谈得上
+        # 提前攒格挡去接 —— 这是这场层主战唯一的解题思路。
+        if self.boss_theme == "square":
+            self._roll_square_boss_intent()
+            return
         r = random.random()
         if r < 0.65:
             self.e_intent = "attack"
-            self.e_intent_val = random.randint(7, 12)
+            self.e_intent_val = roll_attack(self.stats["atk"])
         elif r < 0.85:
             self.e_intent = "block"
         else:
             self.e_intent = "buff"
+
+    def _roll_square_boss_intent(self):
+        """「正方体·三阶」的出招：蓄力 n，下回合打出 n²。
+
+        蓄力时**完全不还手**（不攻击也不加格挡），这给了玩家一个明确的
+        「这一回合可以放心全力输出」的窗口 —— 有张有弛，不然只是一场
+        纯粹的血量交换。
+        """
+        if self.e_charge <= 0:
+            self.e_charge = SQUARE_BOSS_CHARGE
+            self.e_square_n = self.e_charge
+            self.e_intent = "charge"
+            self.e_intent_val = self.e_charge
+        else:
+            n = self.e_charge
+            self.e_intent = "square"
+            self.e_intent_val = n * n
+            self.e_square_n = n          # 供日志 / 飘字 / 意图框写「4² = 16」
+            self.e_charge = 0
 
     # ==================== 选牌 / 组合 ====================
     def clear_selection(self):
@@ -1591,13 +1717,10 @@ class BattleScene:
         self._block_badge(screen, (self.P_X - 122, 505), self.p_block)
 
         # ---- 右：敌人 ----
-        # 意图框悬在头顶（下回合要干什么，提前告诉你）
-        intent = {"attack": "攻击 %d" % self.e_intent_val,
-                  "block": "防御 8",
-                  "buff": "强化 +3"}[self.e_intent]
-        icol = {"attack": RED, "block": ACCENT, "buff": PURPLE}[self.e_intent]
-        isoft = {"attack": RED_SOFT, "block": ACCENT_SOFT,
-                 "buff": PURPLE_SOFT}[self.e_intent]
+        # 意图框悬在头顶（下回合要干什么，提前告诉你）。
+        # 文字/颜色由 intent_style() 一处给出 —— 原来是三个平行的 dict
+        # 按同一批 key 各写一份，加一种意图就得记得改三处。
+        intent, icol, isoft = self.intent_style()
         ibox = pygame.Rect(0, 0, 116, 34)
         ibox.center = (self.E_X, self.E_CY - self.E_R - 34)
         pygame.draw.rect(screen, isoft, ibox, border_radius=17)
@@ -1609,13 +1732,32 @@ class BattleScene:
         # 敌人形象：三档各有各的几何母题（几何魔像 / 方程组·三元 / 不可解之影），
         # 不再用「红圆 + 名字前两字」占位。体型半径沿用原来的 E_R，
         # 底边正好落在 y=435 的地面线上，意图框/血条/影子的位置都不用动。
-        art_shapes.draw_enemy(screen, self.kind, (self.E_X, self.E_CY),
+        art_shapes.draw_enemy(screen, self.e_art, (self.E_X, self.E_CY),
                               self.E_R, t_ms)
 
         self.hp_bar(screen, self.E_X, 494, self.e_hp, self.e_max_hp)
         self._block_badge(screen, (self.E_X - 122, 505), self.e_block)
         nt = self.F_SML.render(self.e_name, True, TEXT_MUTE)
         screen.blit(nt, (self.E_X + 114, 497))
+
+    def intent_style(self):
+        """敌人头顶那个意图框的（文字, 主色, 底色）。
+
+        所有意图都在这里翻译成人话 —— 加一种意图只要改这一个地方。
+        平方层主的「蓄力 / 平方打击」也在这，且**必须写清数字**：
+        这场层主战的全部乐趣就在「看见 16 点、决定这回合攒格挡」，
+        写成一句「蓄力中」玩家就没法做决策了。
+        """
+        if self.e_intent == "square":
+            n = self.e_square_n
+            return "平方 %d²=%d" % (n, self.e_intent_val), RED, RED_SOFT
+        if self.e_intent == "charge":
+            return "蓄力 %d" % self.e_charge, PURPLE, PURPLE_SOFT
+        if self.e_intent == "attack":
+            return "攻击 %d" % self.e_intent_val, RED, RED_SOFT
+        if self.e_intent == "block":
+            return "防御 %d" % self.stats["block"], ACCENT, ACCENT_SOFT
+        return "强化 +%d" % self.stats["buff"], PURPLE, PURPLE_SOFT
 
     def _ground_shadow(self, screen, center, w):
         """角色脚下的一片椭圆影子，把人「钉」在地面上。"""
