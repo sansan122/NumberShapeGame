@@ -1280,23 +1280,14 @@ class SpoilsPanel(Panel):
 def wrapped_lines(text, font, max_w):
     """把 text 按 max_w 折成若干行。
 
-    单独抽出来是因为**布局也要知道会折几行** —— 从前只有 draw_wrapped
-    会折行，排版时只能靠「大概估一下写死 y」。结果「新卡到手」那段说明
-    被「收下」按钮压住了一半（截图里一眼可见）。现在框高和按钮位置都
-    由这里的真实行数推出来。
+    实现已收口到 game_env.wrap_text（牌组面板、本模块、地图遗物图鉴共用）。
+
+    为什么当初要单独抽一个函数：**布局也要知道会折几行** —— 从前只有
+    draw_wrapped 会折行，排版时只能靠「大概估一下写死 y」。结果
+    「新卡到手」那段说明被「收下」按钮压住了一半（截图里一眼可见）。
+    现在框高和按钮位置都由这里的真实行数推出来。
     """
-    lines = []
-    cur = ""
-    for ch in text:
-        test = cur + ch
-        if font.size(test)[0] > max_w and cur:
-            lines.append(cur)
-            cur = ch
-        else:
-            cur = test
-    if cur:
-        lines.append(cur)
-    return lines
+    return E.wrap_text(font, text, max_w)
 
 
 def wrapped_height(text, font, max_w):

@@ -315,6 +315,14 @@ class Game:
             self.deck_view.handle(event, mouse)
             return None
 
+        # 遗物图鉴也是覆盖层（地图上的），开着时同样独占输入。
+        # 放在 D / M 与 handle_map 之前：一来 ESC 这时候只能关面板、
+        # 不能顺手把游戏退掉（「想关个窗口结果整个程序没了」是最让人
+        # 火大的一类 bug），二来免得 D 打开牌组后两层覆盖层叠在一起。
+        if self.mode == "map" and self.map.relic_panel is not None:
+            self.map.handle_relic_panel(event, mouse)
+            return None
+
         # D 打开牌组 —— 三种模式（地图 / 节点 / 战斗）都支持。
         # 两种情况下不开：
         #   · 战斗中正在答题（会干扰输入）
@@ -344,9 +352,16 @@ class Game:
         return None
 
     def handle_map(self, event, mouse):
+        # 遗物图鉴的输入在 handle() 那一层就截住了（覆盖层优先），
+        # 走到这里说明面板没开。
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
                 return "quit"
+            if event.key == pygame.K_r:
+                on = self.map.toggle_find_relic()
+                sfx.play("ui_hover", gap_ms=0)
+                self.flash("查找遗物：开" if on else "查找遗物：关")
+                return None
             if event.key == pygame.K_s:
                 return "save_menu"
             if event.key == pygame.K_l:
@@ -366,6 +381,12 @@ class Game:
             return None
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            # ⚠️ 先问左侧面板上的按钮（遗物图鉴 / 查找遗物），再判节点。
+            # 面板和地图叠在同一块屏幕上，没有这一层的话，点「遗物」按钮
+            # 会顺带把按钮底下的节点也点进去 —— 玩家想查遗物，人却走了一格。
+            if self.map.handle_side_click(mouse):
+                return None
+
             nd = self.map.hovered_node(mouse)
             if nd is None:
                 return None
@@ -459,6 +480,9 @@ class Game:
         self.deck_view.update(dt)
 
         if self.mode == "map":
+            # 左侧面板那行「有存档」只有 main 才知道（存档文件在它手上），
+            # 面板本身归 map_scene 画 —— 把判断结果递过去，别两边各写一遍。
+            self.map.has_save_hint = self.has_save()
             self.map.update(dt)
         elif self.mode == "battle" and self.battle:
             self.battle.update(dt)
@@ -468,8 +492,10 @@ class Game:
         if self.mode == "map":
             self.map.draw(screen, mouse, t_ms)
             self.draw_player_panel(screen)
-            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　D 看牌组　·　S 存档　L 读档　·　M 主菜单　·　ESC 退出"
+            self.draw_hint(screen, "滚轮/↑↓ 滚动　·　点击高亮节点进入　·　R 查找遗物　·　点左侧「遗物」看图鉴　·　D 看牌组　·　S 存档　L 读档　·　M 主菜单"
                            + sfx.key_hint())
+            # 遗物图鉴画在地图和状态面板之上（它俩都归 map_scene 管）
+            self.map.draw_relic_overlay(screen, mouse)
         elif self.mode == "node":
             self.panel.draw(screen, mouse, t_ms)
         elif self.mode == "battle":
@@ -484,62 +510,16 @@ class Game:
         self.deck_view.draw(screen, mouse, t_ms)
 
     def draw_player_panel(self, screen):
-        """地图上显示的玩家状态（覆盖地图自带的简化版）。"""
-        p = self.player
-        has_save = self.has_save()
+        """地图上的玩家状态面板。
 
-        # 面板高度按内容算：多一行「有存档」就高一点
-        rows = 4 + (1 if has_save else 0)
-        box_h = 12 + 24 + 20 + 24 * 3 + 22 * (rows - 4) + 22 + 6
-        box = pygame.Rect(20, 76, 210, box_h)
-        pygame.draw.rect(screen, M.PANEL, box, border_radius=12)
-        pygame.draw.rect(screen, M.PANEL_LINE, box, 1, border_radius=12)
-
-        y = box.y + 12
-        # 角色名从玩家状态读，别写死 —— 选了构形师却显示「演算者」会很怪。
-        # （这是 main.py 自己画的面板，会盖掉 map_scene 里那版，两处都要改）
-        ch = getattr(p, "char", None)
-        who = "%s · %s" % (ch["name"], ch["title"]) if ch else "演算者"
-        if ch:
-            # 头像占位：主题色方框 + 角色符号
-            pip = pygame.Rect(box.x + 12, y - 1, 22, 22)
-            pygame.draw.rect(screen, tuple(ch["color"]), pip, 2,
-                             border_radius=5)
-            ic = self.F_TINY.render(ch["icon"], True, tuple(ch["color"]))
-            screen.blit(ic, ic.get_rect(center=pip.center))
-            screen.blit(self.F_SML.render(who, True, M.TEXT_MUTE),
-                        (pip.right + 7, y))
-        else:
-            screen.blit(self.F_SML.render(who, True, M.TEXT_MUTE),
-                        (box.x + 14, y))
-        y += 24
-
-        bar = pygame.Rect(box.x + 14, y, box.w - 28, 14)
-        pygame.draw.rect(screen, (238, 236, 230), bar, border_radius=7)
-        if p.max_hp > 0 and p.hp > 0:
-            fw = int(bar.w * p.hp / p.max_hp)
-            if fw > 0:
-                pygame.draw.rect(screen, (200, 70, 70),
-                                 pygame.Rect(bar.x, bar.y, fw, bar.h),
-                                 border_radius=7)
-        y += 20
-        screen.blit(self.F_SML.render("生命 %d / %d" % (p.hp, p.max_hp),
-                                      True, M.TEXT), (box.x + 14, y))
-        y += 24
-        screen.blit(self.F_SML.render("金币 %d" % p.gold, True, (196, 148, 30)),
-                    (box.x + 14, y))
-        y += 24
-        screen.blit(self.F_SML.render("遗物 %d 件" % len(p.relics), True, M.TEXT_MUTE),
-                    (box.x + 14, y))
-        y += 24
-        screen.blit(self.F_SML.render("牌库 %d 张" % len(p.deck), True, M.TEXT_MUTE),
-                    (box.x + 14, y))
-
-        # 有存档就在面板底部提示一下，免得玩家忘了
-        if has_save:
-            y += 22
-            screen.blit(self.F_TINY.render("有存档　L 读档", True, M.GOLD),
-                        (box.x + 14, y))
+        **实现在 map_scene.MapScene.draw_side** —— 这里只是转个手。
+        从前这块面板在 map_scene 和 main 里各画了一版（行数还不一样：
+        一个多「未完待证」，一个多「金币 / 牌库」），改一处看不到效果，
+        README 踩坑里记着。现在只剩一版，顺带也才能在上面放可点的按钮
+        （「遗物」和「查找」两个按钮的坐标必须和画出来的完全一致，
+        所以布局也收在 map_scene.player_panel_layout 一处）。
+        """
+        self.map.draw_side(screen)
 
     def draw_hint(self, screen, text):
         """底部提示。

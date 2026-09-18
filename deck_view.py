@@ -58,21 +58,13 @@ PANEL_MIN_H = 260       # 高度下限，牌少的时候别缩成一条
 
 
 def wrap_text(font, text, max_w):
-    """按像素宽度折行。中文逐字折行就够用，不需要按词断。"""
-    lines, cur = [], ""
-    for ch in text:
-        if ch == "\n":
-            lines.append(cur)
-            cur = ""
-            continue
-        if font.size(cur + ch)[0] <= max_w:
-            cur += ch
-        else:
-            lines.append(cur)
-            cur = ch
-    if cur:
-        lines.append(cur)
-    return lines
+    """按像素宽度折行。
+
+    实现已收口到 game_env.wrap_text —— 牌组面板、节点面板、地图的遗物图鉴
+    三处共用一份，别再各写一段（见那边的注释）。这里保留函数名，
+    是因为它早就在被别处调用，改名会牵一圈。
+    """
+    return E.wrap_text(font, text, max_w)
 
 
 class DeckView:

@@ -6,6 +6,8 @@
 操作：
   - 鼠标左键点击节点
   - 鼠标滚轮 / 上下方向键 滚动视角
+  - 点左侧「遗物 N 件」看遗物图鉴（ESC / 点面板外关掉）
+  - R（或点左侧「查找遗物」）在地图上把出遗物的节点找出来
   - ESC 返回
 
 规则：
@@ -26,6 +28,7 @@ import pygame
 import char_art
 import game_env as E
 import player as P      # 路线代价要发遗物，用 P.roll_unowned_relic
+import sfx
 
 # 打包成 exe 后 __file__ 指向临时解包目录，所以一律用 game_env 算路径
 ROOT = E.resource_path()
@@ -63,10 +66,87 @@ TYPE_COLOR = {
     "boss":     (120, 30, 30),
 }
 
+# 遗物紫（与 node_scenes.PURPLE 同色）：角标、查找高亮、图鉴面板都用它，
+# 玩家看到紫色就知道和遗物有关。
+RELIC_COL  = (83, 74, 183)
+RELIC_SOFT = (238, 236, 252)
+
+#: 哪些节点会出遗物 —— 用于 ① 节点角标 ②「查找遗物」高亮 ③ 悬停提示。
+#: 值 = (短标签, 说明)。
+#:
+#: ⚠️ 这张表是**给人看的**，真正发遗物的另有其处：
+#:     宝箱 -> node_scenes.TreasurePanel（必得 1 件；集齐后折现 40 金币）
+#:     精英 -> battle_scene.ENEMY_KINDS["elite"]["relic"] = 1
+#:     层主 -> battle_scene.ENEMY_KINDS["boss"]["relic"] = 1
+#:     商店 -> node_scenes.ShopPanel 货架上有一格遗物（要花金币）
+#:     事件 -> node_scenes.EVENTS「断裂的等式 · 补上缺口」（三选一里的一条）
+#:   所以它们会漂移：改了 ENEMY_KINDS 或 EVENTS 却忘了改这里，地图就会
+#:   指着普通战斗说「这里有遗物」。tmp/verify_relic_find.py 里有一条断言
+#:   专门**去真的读那几个源头**再和这张表对账，对不上就红 ——
+#:   地图上说错「哪里有遗物」，比干脆不标更糟。
+RELIC_SOURCE = {
+    "treasure": ("宝箱", "必得 1 件"),
+    "elite":    ("精英", "战后 1 件"),
+    "boss":     ("层主", "战后 1 件"),
+    "shop":     ("商店", "柜上有 1 件"),
+    "event":    ("事件", "三选一里有 1 条"),
+}
+
+
+def relic_source_of(ntype):
+    """这个节点类型会不会出遗物 -> (短标签, 说明)；不会出就 None。"""
+    return RELIC_SOURCE.get(ntype)
+
+
 # 世界坐标布局参数
 ROW_H = 128          # 行间距（世界坐标）
 NODE_R = 26          # 节点半径
 COL_W = 190          # 列间距
+
+# 左侧状态面板
+PANEL_X, PANEL_Y, PANEL_W = 20, 76, 210
+
+
+def player_panel_layout(has_save=False, hide_next=False):
+    """左侧状态面板的**唯一**布局来源（画和点击共用这一份坐标）。
+
+    为什么要抽成一个函数：这块面板从前被画了两遍 —— 地图自己画一版
+    （draw_side），main.py 又画一版（draw_player_panel）盖在上面，
+    两版的行数还不一样（一个多「未完待证」，一个多「金币 / 牌库」）。
+    改一处没效果是常事（README 踩坑里记着）。
+
+    现在合并成一版，但**点击命中的矩形必须和画出来的完全一致** ——
+    面板上要放「遗物 / 查找」两个按钮，如果按钮位置靠 draw 里那一串
+    `y += 24` 推出来，就会变成「按下去的地方不一定是画出来的地方」。
+    所以坐标在这里一次算清，draw 和 handle 都来取。
+    """
+    x, y0 = PANEL_X, PANEL_Y
+    y = y0 + 12
+
+    lay = {"y_who": y}
+    y += 24
+    lay["bar"] = pygame.Rect(x + 14, y, PANEL_W - 28, 14)
+    y += 20
+    lay["y_hp"] = y
+    y += 24
+    lay["y_gold"] = y
+    y += 24
+    # 「遗物 N 件」本身就是一个按钮（点开图鉴）
+    lay["btn_relics"] = pygame.Rect(x + 12, y - 4, PANEL_W - 24, 27)
+    y += 28
+    lay["y_deck"] = y
+    y += 24
+    lay["y_hide"] = y if hide_next else None
+    y += 22 if hide_next else 0
+    lay["y_save"] = y if has_save else None
+    y += 22 if has_save else 0
+    y += 10
+    # 「查找遗物」开关（按 R 同效）
+    lay["btn_find"] = pygame.Rect(x + 12, y, PANEL_W - 24, 34)
+    y += 34
+    lay["box"] = pygame.Rect(x, y0, PANEL_W, y + 12 - y0)
+    return lay
+
 
 
 def load_map(path=None):
@@ -112,6 +192,13 @@ class MapScene:
         self.log = []
         self.hide_next = False      # 「未完待证」效果
         self.enemy_hp_mult = 1.0    # 「负债增量」效果
+        # 左侧面板顶部那行「有存档」提示由 main 每帧塞进来（它才知道存档文件
+        # 在不在）；地图单独跑的时候恒为 False。
+        self.has_save_hint = False
+        # 遗物图鉴覆盖层：None = 关着，否则是一个 RelicPanel
+        self.relic_panel = None
+        # 「查找遗物」模式：开了之后不出遗物的节点压暗、出遗物的加环
+        self.find_relic = False
 
         self.load_floor(floor_index)
 
@@ -154,6 +241,10 @@ class MapScene:
     @property
     def relics(self):
         return self.player.relics if self.player else self._relics
+
+    def deck_count(self):
+        """牌库张数。地图单独跑（没有 Player）时显示 0。"""
+        return len(self.player.deck) if self.player else 0
 
     # ==================== 层与节点 ====================
     def load_floor(self, idx):
@@ -401,6 +492,100 @@ class MapScene:
     def screen_to_world(self, sx, sy):
         return sx - WIDTH / 2, sy - HEIGHT / 2 + self.cam_y
 
+    # ==================== 遗物：查看 / 查找 ====================
+    def panel_layout(self):
+        """左侧状态面板的当前布局（画和点击都走这里）。"""
+        return player_panel_layout(self.has_save_hint, self.hide_next)
+
+    def node_is_hidden(self, nid, n, reach=None):
+        """这个节点现在是不是「看不清」。
+
+        「未完待证」会让下一行的类型变成问号，所以：
+          · 角标不能标（标了等于把谜底漏了）
+          · 悬停提示也不能照实说类型和描述
+        标记和提示必须**用同一条判据** —— 否则会出现「节点画着问号、
+        悬停却告诉你那是宝箱」，白送的剧透。
+        """
+        if not self.hide_next:
+            return False
+        if reach is None:
+            reach = self.reachable()
+        return nid in reach and n["type"] != "boss"
+
+    def relic_nodes(self):
+        """本层所有「可能出遗物」的节点（看不清的那些不算）。"""
+        return [n for nid, n in self.nodes.items()
+                if relic_source_of(n["type"]) and not self.node_is_hidden(nid, n)]
+
+    def relic_summary(self):
+        """本层遗物来源的分类统计：[("宝箱", 1), ("精英", 2), ...]。
+
+        顺序跟着 RELIC_SOURCE 走（dict 保持插入序），每次刷新都一样 ——
+        不然横幅上的「宝箱 2 · 精英 1」会自己跳来跳去。
+        """
+        cnt = {}
+        for n in self.relic_nodes():
+            cnt[n["type"]] = cnt.get(n["type"], 0) + 1
+        return [(RELIC_SOURCE[t][0], cnt[t]) for t in RELIC_SOURCE if t in cnt]
+
+    def toggle_find_relic(self):
+        """开 / 关「查找遗物」。返回切换后的状态。"""
+        self.find_relic = not self.find_relic
+        sfx.play("ui_click" if self.find_relic else "ui_back", gap_ms=0)
+        if self.find_relic:
+            parts = ["%s %d" % (lbl, n) for lbl, n in self.relic_summary()]
+            self.push_log("查找遗物：本层 %d 处（%s）"
+                          % (sum(n for _, n in self.relic_summary()),
+                             " · ".join(parts) if parts else "无"))
+        return self.find_relic
+
+    def open_relics(self):
+        """打开遗物图鉴。"""
+        self.relic_panel = RelicPanel(self.relics)
+        sfx.play("ui_click", gap_ms=0)
+        return self.relic_panel
+
+    def close_relics(self):
+        """关掉遗物图鉴。返回它原本是不是开着的（好决定要不要响一声）。"""
+        if self.relic_panel is None:
+            return False
+        self.relic_panel = None
+        sfx.play("ui_back", gap_ms=0)
+        return True
+
+    def handle_side_click(self, mouse):
+        """左侧面板上的点击。返回 True = 这次点击被面板吃掉了。
+
+        ⚠️ 必须在**判定节点之前**问这一句：面板和地图叠在同一块屏幕上，
+        少了这一层，「点遗物按钮」会顺手把按钮底下的节点也点进去 ——
+        玩家想查个遗物，结果人往旁边走了一格。
+        """
+        lay = self.panel_layout()
+        if lay["btn_relics"].collidepoint(mouse):
+            self.open_relics()
+            return True
+        if lay["btn_find"].collidepoint(mouse):
+            self.toggle_find_relic()
+            return True
+        return False
+
+    def handle_relic_panel(self, event, mouse):
+        """把事件转给遗物图鉴。返回 True = 面板还开着。
+
+        面板开着的时候它**独占**输入：不然点「关闭」会连带把地图也点一下。
+        """
+        if self.relic_panel is None:
+            return False
+        if self.relic_panel.handle(event, mouse) == "close":
+            self.close_relics()
+            return False
+        return True
+
+    def draw_relic_overlay(self, screen, mouse):
+        """画遗物图鉴（盖在地图上，含左侧面板之上）。"""
+        if self.relic_panel is not None:
+            self.relic_panel.draw(screen, mouse)
+
     # ==================== 绘制 ====================
     def draw(self, screen, mouse, t_ms):
         screen.fill(BG)
@@ -458,7 +643,18 @@ class MapScene:
             color = TYPE_COLOR.get(n["type"], TEXT_MUTE)
 
             # 未知节点（未完待证）
-            hidden = self.hide_next and is_reach and n["type"] != "boss"
+            hidden = self.node_is_hidden(nid, n, reach)
+
+            # 这个节点会不会出遗物（看不清的节点不算：标出来等于剧透）
+            src = None if hidden else relic_source_of(n["type"])
+
+            # 「查找遗物」模式：不出遗物的节点压暗，让来源节点跳出来。
+            # 只是换颜色、不盖半透明纱 —— 盖纱会把「可到达」的呼吸高亮
+            # 一起糊掉，而「这一行我能点哪儿」比找遗物更要紧。
+            # 站着的这个节点永远保持原色，不然玩家会一时找不到自己。
+            dim = self.find_relic and src is None and not is_cur
+            if dim:
+                color = (210, 208, 202)
 
             # 阴影
             pygame.draw.circle(screen, SHADOW, (sx, sy + 4), NODE_R)
@@ -474,6 +670,8 @@ class MapScene:
                 fill = (255, 255, 255)
             else:
                 fill = (244, 243, 238)
+            if dim:
+                fill = (250, 249, 245)
 
             pygame.draw.circle(screen, fill, (sx, sy), NODE_R)
 
@@ -501,6 +699,16 @@ class MapScene:
             it = self.F_ICON.render(icon, True, icol)
             screen.blit(it, it.get_rect(center=(sx, sy)))
 
+            # 遗物来源的标记：平时一个小角标；查找模式下加环 + 写出处
+            if src:
+                if self.find_relic:
+                    pygame.draw.circle(screen, RELIC_COL, (sx, sy), NODE_R + 7, 3)
+                    # 标签挂在节点**下方**：上方是当前位置的立绘小人，
+                    # 挂上去正好糊在人家脸上。
+                    self._draw_relic_tag(screen, sx, sy + NODE_R + 18, src)
+                else:
+                    self._draw_relic_badge(screen, sx, sy)
+
             # 当前位置加个小人标记：有立绘素材就让像素小人站在节点上
             # （待机动画），没素材保持原来的金色小圆点
             if is_cur:
@@ -522,8 +730,48 @@ class MapScene:
         # ---------- 4. 左侧状态 / 底部提示 ----------
         self.draw_side(screen)
 
-        # ---------- 5. 悬停提示 ----------
+        # ---------- 5. 查找遗物的横幅（盖在顶栏下缘）----------
+        if self.find_relic:
+            self.draw_find_banner(screen)
+
+        # ---------- 6. 悬停提示 ----------
         self.draw_tooltip(screen, mouse)
+
+    def _draw_relic_badge(self, screen, sx, sy):
+        """节点右上角的紫色小角标 —— 意思是「这里能出遗物」。
+
+        画在斜上方而不是正上方：正上方要留给当前位置的立绘小人。
+        """
+        bx = sx + int(NODE_R * 0.74)
+        by = sy - int(NODE_R * 0.74)
+        pygame.draw.circle(screen, PANEL, (bx, by), 11)
+        pygame.draw.circle(screen, RELIC_COL, (bx, by), 10)
+        t = self.F_TINY.render("遗", True, (255, 255, 255))
+        screen.blit(t, t.get_rect(center=(bx, by + 1)))
+
+    def _draw_relic_tag(self, screen, cx, cy, src):
+        """查找模式下挂在来源节点下方的标签：遗物 · 宝箱 必得 1 件。"""
+        t = self.F_TINY.render("遗物 · %s %s" % src, True, (255, 255, 255))
+        box = pygame.Rect(0, 0, t.get_width() + 16, t.get_height() + 8)
+        box.center = (cx, cy)
+        pygame.draw.rect(screen, RELIC_COL, box, border_radius=8)
+        screen.blit(t, t.get_rect(center=box.center))
+
+    def draw_find_banner(self, screen):
+        """查找遗物模式下的横幅：本层一共几处、分别是什么。"""
+        summary = self.relic_summary()
+        if summary:
+            body = "　".join("%s %d" % (lbl, n) for lbl, n in summary)
+            text = "查找遗物　本层 %d 处：%s　·　再按 R 退出查找" % (
+                sum(n for _, n in summary), body)
+        else:
+            text = "本层没有遗物来源　·　再按 R 退出查找"
+
+        t = self.F_SML.render(text, True, (255, 255, 255))
+        box = pygame.Rect(0, 0, t.get_width() + 44, 36)
+        box.midtop = (WIDTH // 2, 62)
+        pygame.draw.rect(screen, RELIC_COL, box, border_radius=10)
+        screen.blit(t, t.get_rect(center=box.center))
 
     def hovered_node(self, mouse):
         for nid, n in self.nodes.items():
@@ -550,13 +798,23 @@ class MapScene:
         screen.blit(pt, (WIDTH - pt.get_width() - 28, 18))
 
     def draw_side(self, screen):
-        # ---- 左：状态 ----
-        box = pygame.Rect(20, 76, 210, 150)
+        """左侧状态面板 + 底部提示。
+
+        ⚠️ 坐标全部来自 `self.panel_layout()`，不在这里现推 ——
+        面板上有两个可点的按钮（遗物 / 查找），画和点必须是同一份矩形。
+        这块面板从前在 map_scene 和 main.py 里各画了一版（行数还不一样），
+        现在只剩这一版，main.draw_player_panel 直接调它。
+        """
+        lay = self.panel_layout()
+        box = lay["box"]
         pygame.draw.rect(screen, PANEL, box, border_radius=12)
         pygame.draw.rect(screen, PANEL_LINE, box, 1, border_radius=12)
 
-        y = box.y + 14
-        # 角色名从玩家状态读，别再写死 —— 选了构形师却显示「演算者」会很怪
+        mouse = pygame.mouse.get_pos()
+
+        # ---- 角色名 ----
+        # 从玩家状态读，别再写死 —— 选了构形师却显示「演算者」会很怪
+        y = lay["y_who"]
         who, who_col, who_icon = "演算者", TEXT_MUTE, ""
         if self.player is not None:
             ch = getattr(self.player, "char", None)
@@ -574,44 +832,91 @@ class MapScene:
                         (pip.right + 7, y))
         else:
             screen.blit(self.F_SML.render(who, True, who_col), (box.x + 14, y))
-        y += 24
 
-        # 血条
-        bar = pygame.Rect(box.x + 14, y, box.w - 28, 14)
+        # ---- 血条 ----
+        bar = lay["bar"]
         pygame.draw.rect(screen, (238, 236, 230), bar, border_radius=7)
         if self.max_hp > 0:
             fw = int(bar.w * max(0, self.hp) / self.max_hp)
             if fw > 0:
                 pygame.draw.rect(screen, RED, pygame.Rect(bar.x, bar.y, fw, bar.h),
                                  border_radius=7)
-        y += 20
+
         screen.blit(self.F_SML.render("生命 %d / %d" % (self.hp, self.max_hp), True, TEXT),
-                    (box.x + 14, y))
-        y += 24
-        screen.blit(self.F_SML.render("遗物 %d 件" % len(self.relics), True, TEXT_MUTE),
-                    (box.x + 14, y))
-        y += 24
-        if self.hide_next:
+                    (box.x + 14, lay["y_hp"]))
+        screen.blit(self.F_SML.render("金币 %d" % self.gold, True, GOLD),
+                    (box.x + 14, lay["y_gold"]))
+
+        # ---- 遗物按钮：点开图鉴 ----
+        # 以前这里只是一行死文字「遗物 N 件」—— 玩家能看见数字，
+        # 却没地方查这几件遗物到底干什么用（效果按名字结算，散在
+        # battle_scene 各处，记不住就只能猜）。
+        btn = lay["btn_relics"]
+        hv = btn.collidepoint(mouse)
+        pygame.draw.rect(screen, RELIC_SOFT if hv else (247, 246, 242), btn,
+                         border_radius=7)
+        pygame.draw.rect(screen, RELIC_COL if hv else PANEL_LINE, btn,
+                         1, border_radius=7)
+        rt = self.F_SML.render("遗物 %d 件" % len(self.relics), True, RELIC_COL)
+        screen.blit(rt, (btn.x + 8, btn.y + 5))
+        ft = self.F_TINY.render("查看 ›", True, RELIC_COL if hv else TEXT_FAINT)
+        screen.blit(ft, (btn.right - ft.get_width() - 8, btn.y + 7))
+
+        screen.blit(self.F_SML.render("牌库 %d 张" % self.deck_count(), True, TEXT_MUTE),
+                    (box.x + 14, lay["y_deck"]))
+
+        if lay["y_hide"] is not None:
             screen.blit(self.F_SML.render("未完待证：下一层未知", True, GOLD),
-                        (box.x + 14, y))
+                        (box.x + 14, lay["y_hide"]))
+        if lay["y_save"] is not None:
+            screen.blit(self.F_TINY.render("有存档　L 读档", True, GOLD),
+                        (box.x + 14, lay["y_save"]))
+
+        # ---- 查找遗物开关 ----
+        fb = lay["btn_find"]
+        fhv = fb.collidepoint(mouse)
+        if self.find_relic:
+            bg = RELIC_COL if not fhv else (110, 100, 205)
+            pygame.draw.rect(screen, bg, fb, border_radius=8)
+            label, fg = "查找中 · 按 R 退出", (255, 255, 255)
+        else:
+            pygame.draw.rect(screen, RELIC_SOFT if fhv else (247, 246, 242), fb,
+                             border_radius=8)
+            pygame.draw.rect(screen, RELIC_COL if fhv else PANEL_LINE, fb,
+                             1, border_radius=8)
+            label, fg = "查找遗物 · R", RELIC_COL
+        lt = self.F_SML.render(label, True, fg)
+        screen.blit(lt, lt.get_rect(center=fb.center))
 
         # ---- 底部提示 ----
         tip = "滚轮 / ↑↓ 滚动视角　·　点击高亮节点移动　·　ESC 返回"
         tt = self.F_SML.render(tip, True, TEXT_MUTE)
         screen.blit(tt, (24, HEIGHT - 30))
 
-    def draw_tooltip(self, screen, mouse):
-        n = self.hovered_node(mouse)
-        if n is None:
-            return
+    def tooltip_lines(self, n):
+        """悬停提示要显示哪几行 —— (文字, 颜色, 字体) 的列表。
 
+        单独抽出来是为了**能被断言**：折行/文案这种东西画到屏幕上之后
+        测试就看不见了，于是「未完待证不许剧透」这条规则只能靠肉眼。
+        现在测试可以直接把这几行拿去过一遍。
+        """
         is_reach = n["id"] in self.reachable()
         e = self.edge_to(n["id"])
+        # 同一套「看不清」判据（node_is_hidden）—— 以前提示不看 hide_next，
+        # 于是「未完待证」的下一行虽然画着问号，鼠标一放上去还是老实交代了
+        # 类型和描述，等于白送剧透。
+        hidden = self.node_is_hidden(n["id"], n)
 
-        pad = 14
         lines = []
-        lines.append(("%s  %s" % (n["icon"], n["type_name"]), TEXT, self.F_MID))
-        lines.append((n["desc"], TEXT_MUTE, self.F_SML))
+        if hidden:
+            lines.append(("？  未探明", TEXT, self.F_MID))
+            lines.append(("未完待证：这一格要走到才看得清", TEXT_MUTE, self.F_SML))
+        else:
+            lines.append(("%s  %s" % (n["icon"], n["type_name"]), TEXT, self.F_MID))
+            lines.append((n["desc"], TEXT_MUTE, self.F_SML))
+            src = relic_source_of(n["type"])
+            if src:
+                lines.append(("遗物来源 · %s：%s" % src, RELIC_COL, self.F_SML))
 
         if e and e.get("cost"):
             c = e["cost"]
@@ -629,6 +934,15 @@ class MapScene:
             hint = "点击查看路径（%d 步）" % len(p) if p else "从当前位置无法到达"
         lines.append(("", TEXT, self.F_SML))
         lines.append((hint, ACCENT, self.F_SML))
+        return lines
+
+    def draw_tooltip(self, screen, mouse):
+        n = self.hovered_node(mouse)
+        if n is None:
+            return
+
+        pad = 14
+        lines = self.tooltip_lines(n)
 
         # 计算尺寸
         w = max(f.render(t, True, c).get_width() for t, c, f in lines) + pad * 2
@@ -647,6 +961,144 @@ class MapScene:
             if text:
                 screen.blit(f.render(text, True, col), (box.x + pad, cy))
             cy += f.get_height() + 4
+
+
+# ==================== 遗物图鉴（覆盖层）====================
+
+
+class RelicPanel:
+    """地图上的遗物图鉴：6 件一次列全，拿到的高亮、没拿到的灰着。
+
+    为什么值得单独做一块面板：左侧只写了「遗物 3 件」一个数字，
+    而遗物效果是**按名字结算**、代码散在 battle_scene / node_scenes 各处
+    （见 player.RELIC_POOL 上面那行注释），玩家不查就只能靠猜 ——
+    「换元法」到底是省一张牌还是加伤害？「质数筛」什么时候触发？
+    这里把 6 件的名字、效果、有没有到手一次讲清楚。
+
+    接口跟其它覆盖层一致：handle() / draw()，宿主负责在它开着的时候
+    优先把事件喂过来（见 MapScene.handle_relic_panel）。
+    """
+
+    COLS = 3
+    TILE_W, TILE_H, GAP = 264, 172, 22
+
+    def __init__(self, owned):
+        self.owned = set(owned)
+
+        self.F_TITLE = E.load_font(21)
+        self.F_SML = E.load_font(15)
+        self.F_TINY = E.load_font(13)
+
+        pool = P.RELIC_POOL
+        rows = max(1, (len(pool) + self.COLS - 1) // self.COLS)
+        gw = self.COLS * self.TILE_W + (self.COLS - 1) * self.GAP
+        gh = rows * self.TILE_H + (rows - 1) * self.GAP
+
+        # 宽度按卡片数算出来，不写死 —— 遗物池以后加一件，
+        # 面板自己会变高变宽，不会把最后一张卡挤出屏幕（这个坑在
+        # 牌组面板上踩过，见 README 踩坑）。
+        self.box = pygame.Rect(0, 0, gw + 64, 78 + gh + 96)
+        # 故意偏右一点：左边是状态面板，别一打开就把它整个盖住
+        # （玩家刚点的就是那块面板上的按钮，盖住会让人以为点错了）
+        self.box.center = (700, 384)
+
+        self.tiles = []
+        for i, item in enumerate(pool):
+            r, c = divmod(i, self.COLS)
+            rect = pygame.Rect(self.box.x + 32 + c * (self.TILE_W + self.GAP),
+                               self.box.y + 74 + r * (self.TILE_H + self.GAP),
+                               self.TILE_W, self.TILE_H)
+            self.tiles.append((item, rect, item[0] in self.owned))
+
+        self.btn_close = pygame.Rect(self.box.right - 182, self.box.bottom - 70,
+                                     150, 40)
+
+    # ---------- 输入 ----------
+    def handle(self, event, mouse):
+        """返回 "close" 表示要关掉；其余返回 None。"""
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            return "close"
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            # 点「关闭」或者点面板外都关 —— 只给一个按钮的话，
+            # 小朋友会去点旁边「空白处」然后以为界面卡死了
+            if self.btn_close.collidepoint(mouse):
+                return "close"
+            if not self.box.collidepoint(mouse):
+                return "close"
+        return None
+
+    # ---------- 绘制 ----------
+    def draw(self, screen, mouse):
+        # 背后压一层暗纱：地图还在，但不抢眼
+        veil = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        veil.fill((26, 26, 34, 96))
+        screen.blit(veil, (0, 0))
+
+        pygame.draw.rect(screen, (228, 226, 218), self.box.move(0, 4),
+                         border_radius=16)
+        pygame.draw.rect(screen, PANEL, self.box, border_radius=16)
+        pygame.draw.rect(screen, RELIC_COL, self.box, 2, border_radius=16)
+
+        # 标题
+        t = self.F_TITLE.render("遗物图鉴", True, TEXT)
+        screen.blit(t, (self.box.x + 32, self.box.y + 22))
+        got, total = len(self.owned), len(P.RELIC_POOL)
+        sub = self.F_SML.render("已收集 %d / %d 件" % (got, total), True, RELIC_COL)
+        screen.blit(sub, (self.box.x + 32 + t.get_width() + 16,
+                          self.box.y + 28))
+        note = "遗物效果按名字结算，重复拿到不会叠加" if got else \
+            "还没有遗物 —— 看下面那行「来源」去找"
+        nt = self.F_TINY.render(note, True, TEXT_MUTE)
+        screen.blit(nt, (self.box.right - 32 - nt.get_width(), self.box.y + 30))
+
+        for item, rect, has in self.tiles:
+            self._draw_tile(screen, mouse, item, rect, has)
+
+        # 底部：来源图例 + 关闭
+        src = "来源：" + "　".join(
+            "%s（%s）" % (lbl, note_) for lbl, note_ in RELIC_SOURCE.values())
+        st = self.F_TINY.render(src, True, TEXT_MUTE)
+        screen.blit(st, (self.box.x + 32, self.box.bottom - 60))
+
+        hv = self.btn_close.collidepoint(mouse)
+        pygame.draw.rect(screen, (110, 100, 205) if hv else RELIC_COL,
+                         self.btn_close, border_radius=10)
+        bt = self.F_SML.render("关闭（ESC）", True, (255, 255, 255))
+        screen.blit(bt, bt.get_rect(center=self.btn_close.center))
+
+    def _draw_tile(self, screen, mouse, item, r, has):
+        """一张遗物卡：名字 + 效果 + 到手了没有。"""
+        name, desc = item
+        hv = r.collidepoint(mouse)
+
+        if has:
+            pygame.draw.rect(screen, PANEL, r, border_radius=10)
+            pygame.draw.rect(screen, RELIC_COL, r, 3 if hv else 2,
+                             border_radius=10)
+        else:
+            pygame.draw.rect(screen, (246, 245, 241), r, border_radius=10)
+            pygame.draw.rect(screen, (219, 217, 209) if hv else (230, 228, 220),
+                             r, 1, border_radius=10)
+
+        # 状态角标（右上角）
+        tag = "已获得" if has else "未获得"
+        tag_bg = RELIC_COL if has else (206, 204, 197)
+        tt = self.F_TINY.render(tag, True, (255, 255, 255))
+        tbox = pygame.Rect(0, 0, tt.get_width() + 16, tt.get_height() + 6)
+        tbox.topright = (r.right - 12, r.y + 12)
+        pygame.draw.rect(screen, tag_bg, tbox, border_radius=7)
+        screen.blit(tt, tt.get_rect(center=tbox.center))
+
+        nm = self.F_TITLE.render(name, True, TEXT if has else TEXT_FAINT)
+        screen.blit(nm, (r.x + 14, r.y + 14))
+
+        # 效果文案：按真实行数往下排（别写死 y —— 文案一改就会被压住，
+        # 上一轮「新卡到手」就是这么被按钮盖掉半行的）
+        cy = r.y + 52
+        for ln in E.wrap_text(self.F_SML, desc, r.w - 28):
+            screen.blit(self.F_SML.render(
+                ln, True, TEXT_MUTE if has else TEXT_FAINT), (r.x + 14, cy))
+            cy += self.F_SML.get_height() + 3
 
 
 # ==================== 自立运行时 ====================
@@ -673,8 +1125,14 @@ def main():
             if ev.type == pygame.QUIT:
                 running = False
             elif ev.type == pygame.KEYDOWN:
+                # 遗物图鉴开着时它独占输入（ESC 只关面板，不退出程序）
+                if scene.relic_panel is not None:
+                    scene.handle_relic_panel(ev, mouse)
+                    continue
                 if ev.key == pygame.K_ESCAPE:
                     running = False
+                elif ev.key == pygame.K_r:
+                    scene.toggle_find_relic()
                 elif ev.key in (pygame.K_UP, pygame.K_w):
                     scene.scroll_up(60)
                 elif ev.key in (pygame.K_DOWN, pygame.K_s):
@@ -686,6 +1144,11 @@ def main():
                 else:
                     scene.scroll_down(-ev.y * 50)
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if scene.handle_relic_panel(ev, mouse):
+                    continue
+                # 先问左侧面板上的按钮，再判节点 —— 否则点「遗物」会顺带走动
+                if scene.handle_side_click(mouse):
+                    continue
                 n = scene.hovered_node(mouse)
                 if n is not None:
                     if scene.can_move_to(n["id"]):
@@ -701,6 +1164,7 @@ def main():
 
         scene.update(dt)
         scene.draw(screen, mouse, t_ms)
+        scene.draw_relic_overlay(screen, mouse)
         pygame.display.flip()
 
     pygame.quit()

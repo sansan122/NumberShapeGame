@@ -194,6 +194,41 @@ def fonts(sizes):
     return {k: load_font(v) for k, v in sizes.items()}
 
 
+# ---------------------------------------------------------------------------
+# 三、通用文字折行
+# ---------------------------------------------------------------------------
+
+def wrap_text(font, text, max_w):
+    """把 text 按像素宽度折成若干行（中文逐字折行就够，不必按词断）。
+
+    放在这里是因为**三处都要用**：牌组面板、节点面板、地图的遗物图鉴。
+    这份逻辑原先抄了三遍（deck_view.wrap_text / node_scenes.wrapped_lines /
+    地图里再写一份），改一次行距要翻三个文件 —— 本项目已经因为
+    「同一件事写两处」栽过好几次（见 README 踩坑），所以收口到这里。
+
+    `\n` 是硬换行（说明文案里写死断行的地方靠它）。
+
+    单个字就超宽时也硬放一行 —— 老版本会先 append 一个空串，
+    折出来的第一行是空行，排版算高度就会莫名多出一行。
+    """
+    lines, cur = [], ""
+    for ch in text:
+        if ch == "\n":
+            lines.append(cur)
+            cur = ""
+            continue
+        if font.size(cur + ch)[0] <= max_w:
+            cur += ch
+        elif cur:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur = ch          # 一个字就超宽：让它自己占一行，别死循环
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def describe_environment():
     """启动时打一行环境说明，出问题时一眼能看出是哪里的锅。"""
     return (
