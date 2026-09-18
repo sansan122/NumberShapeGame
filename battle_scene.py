@@ -257,8 +257,46 @@ def roll_attack(atk_mult):
     return random.randint(int(round(lo * atk_mult)), int(round(hi * atk_mult)))
 
 
+# ==================== 遗物效果 ====================
+# 十件遗物里八件在战斗内结算，效果**只**散在这五处：
+#   BattleScene.__init__（开场类）、submit_quiz（答对计数）、
+#   _settle_card（伤害 / 格挡加成）、_enemy_hit（反例）、
+#   check_end（复利金币）。
+# 只准这五处判名字 —— 按名字结算本来就不容易查，再多散几处必然出现
+# 「改了名字漏一处」；这一轮把六件换成十件、名字全换新，就是靠这条纪律
+# 一次改干净的。
+#
+# 数值一律写成常量：调平衡只动这里，测试也读这里，实现与断言不会漂移。
+RELIC_SEQ_MAX = 3        # 等比数列：本回合伤害加成的上限
+RELIC_EQWALL_BLOCK = 4   # 等周不等式：打出过数字卡后，图形卡的额外格挡
+RELIC_REFLECT = 3        # 反例：被命中时反弹的伤害
+RELIC_CONSERVE = 4       # 守恒律：每场战斗开始时恢复的生命
+RELIC_COMPOUND = 1.5     # 复利：战斗胜利金币奖励的倍率
+
+
+def seq_bonus(correct_this_turn):
+    """遗物「等比数列」本回合的伤害加成：答对得越多打得越疼，封顶 RELIC_SEQ_MAX。
+
+    「等比」的意思是**本回合内越往后越强**，所以它是唯一一件奖励
+    「多做几道题」的遗物 —— 别的遗物都在奖励某一种出牌，它在奖励做题本身。
+    """
+    return min(max(0, int(correct_this_turn)), RELIC_SEQ_MAX)
+
+
+def battle_gold_reward(player, base_gold):
+    """这一场胜利实际到手的金币（遗物「复利」在这里放大一次）。
+
+    单独提成函数：胜利结算（check_end 真的加钱）和结算面板上写
+    「+N 金币」**必须是同一个数** —— 以前面板直接写 reward_gold，
+    加上复利之后就会「显示 28、到手 42」，玩家一眼看穿。
+    """
+    if player.has_relic("复利"):
+        return int(round(base_gold * RELIC_COMPOUND))
+    return int(base_gold)
+
+
 def sieved_card(deck):
-    """遗物「质数筛」：从牌库里挑出最弱的一张（只读，不改 deck）。
+    """遗物「最简形式」：从牌库里挑出最弱的一张（只读，不改 deck）。
 
     强弱只看固定收益量：伤害 + 格挡。抽牌 / 清格挡这类功能卡没有数值，
     权重记 0 —— 它们本来就在「弱」那一档，被筛掉不冤。
@@ -568,7 +606,18 @@ class BattleScene:
         self.e_intent_val = 9
         # 平方主题层主的蓄力：0 = 没在蓄力。见 roll_intent / enemy_act。
         self.e_charge = 0
-        self.reward_gold = cfg["gold"]
+        # 「复利」的实际到手金额：配在 ENEMY_KINDS 里的是**基础**奖励，
+        # 面板显示与真正加钱都走 battle_gold_reward 一份实现。
+        self.reward_gold = battle_gold_reward(player, cfg["gold"])
+        # 遗物「守恒律」：战斗开始时回血（玩家没有别的稳定回血手段，
+        # 休整点和商店之外全指望它）。回的血**立刻写回 player.hp** ——
+        # 中途退出、重开也不会把这一次恢复吞掉。日志等 self.log 建好再补。
+        self.healed_start = 0
+        if player.has_relic("守恒律") and self.p_hp < self.p_max_hp:
+            before = self.p_hp
+            self.p_hp = min(self.p_max_hp, self.p_hp + RELIC_CONSERVE)
+            player.hp = self.p_hp
+            self.healed_start = self.p_hp - before
 
         # ---- 回合 ----
         self.turn = 1
@@ -576,10 +625,10 @@ class BattleScene:
 
         # ---- 牌 ----
         self.deck = [c.clone() for c in player.deck]
-        # 遗物「质数筛」：战斗开始时从牌库筛掉 1 张最弱的卡。
+        # 遗物「最简形式」：战斗开始时从牌库筛掉 1 张最弱的卡。
         # 必须赶在洗牌抽牌之前做，否则筛掉的可能是已经上手的那张。
         self.sieved = None
-        if player.has_relic("质数筛"):
+        if player.has_relic("最简形式"):
             self.sieved = sieved_card(self.deck)
             if self.sieved is not None:
                 self.deck.remove(self.sieved)
@@ -588,7 +637,7 @@ class BattleScene:
         self.discard = []
         # 发牌不出声（见 draw_cards 里的 _quiet_draw）
         self._quiet_draw = True
-        self.draw_cards(5 + self.draw_bonus)
+        self.draw_cards(self.hand_size())
         self._quiet_draw = False
 
         # ---- 交互 ----
@@ -596,7 +645,10 @@ class BattleScene:
         self.pending_number = None
         self.log = ["遭遇 %s！算对才能出牌。" % self.e_name]
         if self.sieved is not None:
-            self.log.insert(0, "「质数筛」生效：筛掉了「%s」" % self.sieved.name)
+            self.log.insert(0, "「最简形式」生效：筛掉了「%s」" % self.sieved.name)
+        if self.healed_start > 0:
+            self.log.insert(0, "「守恒律」生效：恢复 %d 点生命"
+                            % self.healed_start)
         self.quiz = None
         self.combo_hint = ""
 
@@ -611,12 +663,15 @@ class BattleScene:
         self.pops = []                # 飘字（dict 列表，见 pop()）
         self._canvas = None           # 震动用的离屏画布（惰性创建，见 draw）
 
-        # ---- 遗物效果 ----
-        self.extra_block_first = 0
-        if player.has_relic("勾股定理"):
-            self.extra_block_first = 3
-        # 「公理石」的最大生命加成在 Player.add_relic 里结算（拿到就生效），
-        # 战斗这边不用管；「质数筛」见上面牌组那一段。
+        # ---- 遗物效果（战斗内的两件「按回合算」的状态）----
+        # 本回合答对了几题 -> 遗物「等比数列」的伤害加成（见 submit_quiz / _settle_card）
+        self.correct_this_turn = 0
+        # 本回合打出过数字卡没有 -> 遗物「等周不等式」的判定条件（见 _settle_card）。
+        # 不能借用 first_number_used：那个是演算者【直感】的，只在首张时置位。
+        self.number_played = False
+        # 「定义域扩张」的最大生命加成在 Player.add_relic 里结算（拿到就生效），
+        # 「约分」在 Player.removal_price 里结算，「守恒律」「最简形式」
+        # 见上面那两段；战斗这边不用管。
 
         # ---- 字体 ----
         self.F_BIG = E.load_font(34)
@@ -646,6 +701,17 @@ class BattleScene:
         self.layout_hand()  # 先算一次手牌位置，保证第一帧点得到
 
     # ==================== 牌库 ====================
+    def hand_size(self):
+        """每个抽牌阶段该抽几张 —— 开局发牌与回合开始**共用这一份**。
+
+        以前开局写 `5 + self.draw_bonus`、回合开始另写
+        `5 + self.draw_bonus + (1 if 多抽牌那件遗物 else 0)`，式子不一样：
+        拿到「多抽一张」那件遗物之后，第一回合 5 张、第二回合起 6 张，
+        玩家会以为遗物第一回合没生效（差点照着 5 张去写断言）。
+        """
+        return 5 + self.draw_bonus + (1 if self.player.has_relic("排列组合")
+                                      else 0)
+
     def draw_cards(self, n):
         """抽 n 张牌。
         注意：这个方法原来叫 draw()，会和「画一帧」的 draw(screen, mouse, t_ms)
@@ -936,6 +1002,9 @@ class BattleScene:
             correct = got == q["ans"]
 
         if correct:
+            # 答对计数**必须在结算之前**加：遗物「等比数列」的加成是按
+            # 「本回合第几道对的题」算的，这一道当然要算进去。
+            self.correct_this_turn += 1
             # 组合题（面积 / 平方）用更华丽的 combo_ok：组合要花两张卡、
             # 答一道更难的题，反馈必须明显比单卡更强，玩家才觉得划算。
             # 它紧接着还会叠一发 hit_massive，两段自然连成
@@ -974,12 +1043,14 @@ class BattleScene:
             else:
                 self.log.insert(0, "✗ 这不是%s　卡牌失效"
                                 % q["options"][q["ans_idx"]])
-            # 遗物「换元法」：每回合第一次算错不消耗卡牌
-            if (self.player.has_relic("换元法") and
+            # 遗物「容错区间」：每回合第一次算错不消耗卡牌。
+            # 它是唯一一件直接改「算错」这条规则的遗物 —— 有它在，
+            # 孩子才敢去点那道自己不太确定的题。
+            if (self.player.has_relic("容错区间") and
                     not getattr(self, "_eq_used", False)):
                 self._eq_used = True
                 n_cards = len(q.get("cards", [q["card"]]))
-                self.log.insert(0, "「换元法」生效：这%s被留下了"
+                self.log.insert(0, "「容错区间」生效：这%s被留下了"
                                 % ("两张卡都" if n_cards > 1 else "张卡"))
                 for c in q.get("cards", [q["card"]]):
                     c.selected = False
@@ -996,7 +1067,7 @@ class BattleScene:
         """结算一张卡的效果（伤害 / 格挡 / 抽牌 / 清格挡）。
 
         单卡出牌、面积组合、平方组合**都走这里** —— 遗物加成
-        （约等号 / 勾股定理）和角色被动（直感）只有这一份实现，
+        （等比数列 / 等周不等式）和角色被动（直感）只有这一份实现，
         三条路不会算出三套数值。
 
         dmg_override：把这张卡的基础伤害换成别的数。平方组合用它把
@@ -1004,14 +1075,25 @@ class BattleScene:
         这个方法只管效果，不管弃牌、不管胜负（那是调用方的事）。
         """
         eff = card.effect
+        # 本回合「打出过数字卡」在这里记一笔（遗物「等周不等式」看它）。
+        # 记在结算里、不记在 submit_quiz 里：算错的牌根本没打出去，不该算数。
+        if card.ctype == "number":
+            self.number_played = True
         # 这张牌这次实际能打出的基础伤害：平方组合会把它换成 n²。
         base = eff.get("dmg", 0) if dmg_override is None else dmg_override
-        # 伤害为 0 的牌**不吃任何伤害加成**（约等号 / 直感）：
+        # 伤害为 0 的牌**不吃任何伤害加成**（等比数列 / 直感）：
         # 「0² = 0」就该是 0，给一张没有伤害的牌 +1，玩家只会觉得账算不清。
         has_dmg = base > 0
         bonus = 0
-        if self.player.has_relic("约等号") and has_dmg:
-            bonus = 1
+        # 遗物「等比数列」：本回合每答对一题 +1，封顶 RELIC_SEQ_MAX。
+        # 加成的对象是**这一次结算的伤害**，所以平方组合打出的 81 也照吃 ——
+        # 「答对三道题再甩 81」正是这件遗物想让人干的事。
+        if self.player.has_relic("等比数列") and has_dmg:
+            seq = seq_bonus(self.correct_this_turn)
+            if seq > 0:
+                bonus += seq
+                self.log.insert(0, "「等比数列」生效：本回合答对 %d 题，伤害 +%d"
+                                % (self.correct_this_turn, seq))
         # 演算者【直感】：每回合打出的第一张数字卡伤害 +1。
         # 判定放在这里而不是 submit_quiz —— 算对才叫「打出」，
         # 不然算错一次就把直感白嫖掉了。
@@ -1035,11 +1117,15 @@ class BattleScene:
 
         if "block" in eff:
             gain = eff["block"]
-            # 遗物「勾股定理」：本回合首次图形卡额外格挡
-            if card.ctype == "shape" and self.extra_block_first > 0:
-                gain += self.extra_block_first
-                self.extra_block_first = 0
-                self.log.insert(0, "「勾股定理」生效：+3 格挡")
+            # 遗物「等周不等式」：本回合**先出过数字卡**，图形卡的格挡才加厚。
+            # 判据用「本回合有没有出过数字卡」而不是「上一张是不是数字卡」：
+            # 数形结合（数字卡 + 图形卡）里数字卡先结算，组合也吃得到 ——
+            # 这正是它要奖励的打法：数字与图形交替着出，两边都不偏废。
+            if (card.ctype == "shape" and self.player.has_relic("等周不等式")
+                    and self.number_played):
+                gain += RELIC_EQWALL_BLOCK
+                self.log.insert(0, "「等周不等式」生效：+%d 格挡"
+                                % RELIC_EQWALL_BLOCK)
             self.p_block += gain
             self.log.insert(0, "获得 %d 点格挡" % gain)
             # 上盾和被敲是两件事，用两个不同的音（shield ≠ hit_block）
@@ -1106,16 +1192,29 @@ class BattleScene:
         self.check_end()
 
     def check_end(self):
+        """判胜负。**钱和血必须写在「只结算一次」的门里面。**
+
+        ⚠️ check_end 每出一张牌都会被调两遍（resolve_card 里一次、
+        submit_quiz 结尾又一次），而且胜负已定之后还会被反复调到
+        （点结算画面、结束回合…）。原来加金币那一行写在 first 判断
+        **外面**，于是每赢一场发两遍钱 —— 一直没人发现，是因为
+        平时的断言只看「有没有发遗物 / 赢了没」，没人去数金币。
+        加「复利」时写了「面板显示的数 = 到手的数」这条断言，当场红：
+        面板写 42、兜里多了 84。
+        """
         if self.e_hp <= 0:
             self.e_hp = 0
-            first = not self.done           # check_end 会被调很多次，只演一次
+            first = not self.done           # check_end 会被调很多次，只结算一次
             self.phase = "win"
             self.result = "win"
             self.done = True
-            self.player.gold += self.reward_gold
-            self.player.hp = max(0, self.p_hp)
-            self.player.log("战斗胜利，+%d 金币" % self.reward_gold)
             if first:
+                self.player.gold += self.reward_gold
+                self.player.hp = max(0, self.p_hp)
+                self.player.log("战斗胜利，+%d 金币" % self.reward_gold)
+                if self.player.has_relic("复利"):
+                    self.log.insert(0, "「复利」生效：这一场的金币已按 %.1f 倍结算"
+                                    % RELIC_COMPOUND)
                 # 结算演出：敌人倒地 →（0.5s）号角 →（1.05s）金币入袋。
                 # 三个音**必须错开**：同时播只会糊成一坨噪音，
                 # 而「先后顺序」本身就是一段小小的胜利演出。
@@ -1128,9 +1227,9 @@ class BattleScene:
             self.phase = "lose"
             self.result = "lose"
             self.done = True
-            self.player.hp = 0
-            self.player.log("倒在了 %s 面前" % self.e_name)
             if first:
+                self.player.hp = 0
+                self.player.log("倒在了 %s 面前" % self.e_name)
                 # 战败音刻意柔和（见 sfx.lose）：孩子输一局本来就难受，
                 # 再来一段沉重的音乐，下次就不想打开了
                 sfx.play("lose", gap_ms=0)
@@ -1162,6 +1261,16 @@ class BattleScene:
         if actual > 0:
             self.p_anim.play("hit")    # 真的挨了打 -> 播受击动作
             self.log.insert(0, tmpl % actual)
+            # 遗物「反例」：这一下真挨到身上了，反弹 RELIC_REFLECT 点回去。
+            # 只在**掉血**时反弹 —— 被格挡完全挡下不算「命中」；
+            # 反弹也不吃敌人的格挡：它是「反驳」，不是一次攻击。
+            # 胜负由调用方（enemy_act）随后的 check_end 收尾。
+            if self.player.has_relic("反例"):
+                self.e_hp = max(0, self.e_hp - RELIC_REFLECT)
+                self.e_flash = FLASH_LIFE
+                self.log.insert(0, "「反例」生效：反弹 %d 点伤害" % RELIC_REFLECT)
+                sfx.play("hit_light", vol=0.8, gap_ms=0)
+                self.pop("反例 −%d" % RELIC_REFLECT, self.E_X, 300, PURPLE, 22)
             # 挨打反馈：闷响（比打击音柔和一档）+ 整屏泛红 + 飘字。
             # 刻意不震屏 —— 屏幕震动是「我打中了」的爽感，被揍也震
             # 会把这个信号搞混。
@@ -1217,11 +1326,12 @@ class BattleScene:
                 self.log.insert(0, "「承形」生效：+2 格挡")
             self.carry_block = 0
             self.first_number_used = False          # 新回合，直感重置
-            self._eq_used = False
-            n = 5 + self.draw_bonus + (1 if self.player.has_relic("对数尺") else 0)
+            self._eq_used = False                   # 容错区间：每回合一次
+            self.correct_this_turn = 0              # 等比数列：本回合重新累计
+            self.number_played = False              # 等周不等式：本回合重新计
             # 回合开始的「叮」比抽牌声早一点，两者才不会糊在一起
             sfx.play("turn_start", gap_ms=0)
-            self.draw_cards(n)
+            self.draw_cards(self.hand_size())
             self.roll_intent()
             self.phase = "player"
 
@@ -2164,6 +2274,7 @@ class BattleScene:
         screen.blit(mt, mt.get_rect(center=(box.centerx, box.y + 62)))
 
         if self.result == "win":
+            # 显示的就是**真的到手**的那个数（复利已经在 reward_gold 里算过）
             sub = "+%d 金币" % self.reward_gold
             st = self.F_MID.render(sub, True, AMBER)
             screen.blit(st, st.get_rect(center=(box.centerx, box.y + 112)))

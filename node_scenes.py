@@ -943,7 +943,7 @@ class TreasurePanel(Panel):
         if got:
             self.relic_name, self.relic_desc = got
             # 必须走 add_relic 而不是 relics.append ——
-            # 「公理石」那种「拿到就改数值」的遗物在那里结算
+            # 「定义域扩张」那种「拿到就改数值」的遗物在那里结算
             note = self.player.add_relic(self.relic_name)
             if note:
                 # 补进描述里显示，不另开一行（面板下半部分是按钮，挤不下）
@@ -1055,7 +1055,7 @@ class SpoilsPanel(Panel):
             got = roll_unowned_relic(player)
             if got:
                 self.relic_name, self.relic_desc = got
-                # 走 add_relic（不是 relics.append）——「公理石」那类
+                # 走 add_relic（不是 relics.append）——「定义域扩张」那类
                 # 拿到就改数值的遗物要在那里结算
                 note = player.add_relic(self.relic_name)
                 if note:

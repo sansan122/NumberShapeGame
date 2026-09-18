@@ -967,20 +967,27 @@ class MapScene:
 
 
 class RelicPanel:
-    """地图上的遗物图鉴：6 件一次列全，拿到的高亮、没拿到的灰着。
+    """地图上的遗物图鉴：整池一次列全，拿到的高亮、没拿到的灰着。
 
     为什么值得单独做一块面板：左侧只写了「遗物 3 件」一个数字，
-    而遗物效果是**按名字结算**、代码散在 battle_scene / node_scenes 各处
-    （见 player.RELIC_POOL 上面那行注释），玩家不查就只能靠猜 ——
-    「换元法」到底是省一张牌还是加伤害？「质数筛」什么时候触发？
-    这里把 6 件的名字、效果、有没有到手一次讲清楚。
+    而遗物效果是**按名字结算**、代码散在 battle_scene / player 各处
+    （见 player.RELIC_POOL 上面那段注释），玩家不查就只能靠猜 ——
+    「容错区间」是省一张牌还是加伤害？「等周不等式」什么时候触发？
+    这里把每件的名字、效果、有没有到手一次讲清楚。
+
+    卡片高度是按**行数**算出来的，不是写死的：遗物池从 6 件涨到 10 件时，
+    写死的那套尺寸算出 928 高，最后一行整个掉出 720 的屏幕下沿（还点不到）。
+    现在池子再怎么涨，也只是卡片变矮，面板**永远留在屏幕里**。
 
     接口跟其它覆盖层一致：handle() / draw()，宿主负责在它开着的时候
     优先把事件喂过来（见 MapScene.handle_relic_panel）。
     """
 
-    COLS = 3
-    TILE_W, TILE_H, GAP = 264, 172, 22
+    COLS = 4
+    #: 卡片的目标尺寸（高度只是**上限**，实际高度按行数算，见 __init__）
+    TILE_W, TILE_H, GAP = 236, 146, 18
+    #: 面板里卡片区上下要留掉的固定高度：标题那一行 + 底部「来源 / 关闭」
+    TOP_PAD, BOTTOM_PAD = 78, 96
 
     def __init__(self, owned):
         self.owned = set(owned)
@@ -992,12 +999,23 @@ class RelicPanel:
         pool = P.RELIC_POOL
         rows = max(1, (len(pool) + self.COLS - 1) // self.COLS)
         gw = self.COLS * self.TILE_W + (self.COLS - 1) * self.GAP
-        gh = rows * self.TILE_H + (rows - 1) * self.GAP
+
+        # 高度：先算「屏幕里还剩多少高度可以给卡片」，再和 TILE_H 取小的那个。
+        # 3 列 × 172 高那套 6 件时刚好卡在 720 边上；遗物池加到 10 件变成
+        # 4 行，直接算出 928 高 —— 最后一行整个掉出屏幕（而且点不到）。
+        # 所以卡片高度**必须按行数算出来**，池子以后再涨也只是卡片变矮。
+        # 104 是「名字两行 + 效果两行」还装得下的下限；真涨到装不下那天，
+        # tmp/verify_relic_find.py 里那条「卡片都在面板框里」会先红。
+        avail = (HEIGHT - 32 - self.TOP_PAD - self.BOTTOM_PAD
+                 - (rows - 1) * self.GAP)
+        tile_h = max(104, min(self.TILE_H, avail // rows))
+        gh = rows * tile_h + (rows - 1) * self.GAP
+        self.tile_h = tile_h
 
         # 宽度按卡片数算出来，不写死 —— 遗物池以后加一件，
-        # 面板自己会变高变宽，不会把最后一张卡挤出屏幕（这个坑在
+        # 面板自己会变宽，不会把最后一列挤出屏幕（这个坑在
         # 牌组面板上踩过，见 README 踩坑）。
-        self.box = pygame.Rect(0, 0, gw + 64, 78 + gh + 96)
+        self.box = pygame.Rect(0, 0, gw + 64, self.TOP_PAD + gh + self.BOTTOM_PAD)
         # 故意偏右一点：左边是状态面板，别一打开就把它整个盖住
         # （玩家刚点的就是那块面板上的按钮，盖住会让人以为点错了）
         self.box.center = (700, 384)
@@ -1006,8 +1024,8 @@ class RelicPanel:
         for i, item in enumerate(pool):
             r, c = divmod(i, self.COLS)
             rect = pygame.Rect(self.box.x + 32 + c * (self.TILE_W + self.GAP),
-                               self.box.y + 74 + r * (self.TILE_H + self.GAP),
-                               self.TILE_W, self.TILE_H)
+                               self.box.y + 74 + r * (tile_h + self.GAP),
+                               self.TILE_W, tile_h)
             self.tiles.append((item, rect, item[0] in self.owned))
 
         self.btn_close = pygame.Rect(self.box.right - 182, self.box.bottom - 70,
