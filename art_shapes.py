@@ -294,6 +294,24 @@ def _icon_fallback(screen, cx, cy, s, col):
     screen.blit(t, t.get_rect(center=(cx, cy)))
 
 
+def _icon_digit(d):
+    """数字牌 —— 圆盘里一个大数字（返回一个"画图函数"，见下面的注册处）。
+
+    数字牌的图案就是这张牌的数字本身：牌面写的是它、打出的伤害是它、
+    题目难度也是按它定的，不用再记一套「图标 ↔ 数值」的对应关系。
+    圆盘 + 描边是为了在小卡上也能一眼看出是"一张牌上的数"，
+    而不是屏幕上随便一个数字。
+    """
+    def draw(screen, cx, cy, s, col):
+        r = s * 0.46
+        pygame.draw.circle(screen, _shade(col, 0.84), (cx, cy), int(r))
+        pygame.draw.circle(screen, col, (cx, cy), int(r), max(2, int(s * 0.055)))
+        f = _font(max(10, int(s * 0.62)))
+        t = f.render(d, True, _shade(col, -0.28))
+        screen.blit(t, t.get_rect(center=(cx, cy + int(s * 0.01))))
+    return draw
+
+
 # 卡名 -> 图案。没配到的走 _icon_fallback（问号圆盘），
 # 这样以后加新卡忘了补图案时能一眼看出来，而不是静默留白。
 _ICONS = {
@@ -309,6 +327,12 @@ _ICONS = {
     "反证":   _icon_contradiction,
     "换元":   _icon_substitute,
 }
+
+# 数字牌 0~9：图案就是那个数字。
+# （上面的「加一 / 凑十 / 未知数 / 开方」是老牌面的图案，老存档里还有
+#   这些卡，所以图案不能删；新牌面统一用 0~9。）
+for _d in "0123456789":
+    _ICONS[_d] = _icon_digit(_d)
 
 
 # ---------------------------------------------------------------------------

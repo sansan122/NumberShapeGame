@@ -26,6 +26,9 @@ import pygame
 
 import game_env as E
 import art_shapes
+# 卡牌类型的三件套（数字 / 图形 / 运算）统一从 player 取 ——
+# 战斗、牌组、商店三处必须同色，否则玩家会以为「平方」是一种新东西。
+from player import CARD_TYPE_STYLE, card_color, card_soft, type_label
 
 # ==================== 配色（和 battle_scene 保持一致）====================
 PANEL       = (255, 255, 255)
@@ -98,10 +101,11 @@ class DeckView:
     def open_with(self, cards, char=None):
         """打开并显示这批卡。char 传角色 dict 就用它的名字和主题色。"""
         # 排一下序：数字卡在前、图形卡在后，同类型按费用、再按名字。
-        # 这样同名卡自然聚成一堆，一眼能看出「我有几张凑十」。
+        # 这样同名卡自然聚成一堆，一眼能看出「我有几张三角盾」。
+        order = {t: i for i, t in enumerate(CARD_TYPE_STYLE)}
         self.cards = sorted(
             list(cards),
-            key=lambda c: (0 if c.ctype == "number" else 1, c.cost, c.name))
+            key=lambda c: (order.get(c.ctype, len(order)), c.cost, c.name))
         if char:
             self.char_name = char.get("name", "")
             self.char_color = char.get("color", ACCENT)
@@ -233,8 +237,10 @@ class DeckView:
 
     def _draw_header(self, screen):
         n = len(self.cards)
-        n_num = sum(1 for c in self.cards if c.ctype == "number")
-        n_shape = n - n_num
+        # 按类型统计（数字 / 图形 / 运算），类型和颜色都从 player 那份定义来
+        counts = {t: 0 for t in CARD_TYPE_STYLE}
+        for c in self.cards:
+            counts[c.ctype] = counts.get(c.ctype, 0) + 1
 
         title = "我的牌组"
         if self.char_name:
@@ -242,7 +248,7 @@ class DeckView:
         t = self.F_BIG.render(title, True, TEXT)
         screen.blit(t, (self.panel.x + PAD, self.panel.y + 18))
 
-        # 统计：总数 + 数字卡 / 图形卡
+        # 统计：总数 + 各类型张数
         x = self.panel.x + PAD + t.get_width() + 18
         y = self.panel.y + 26
         st = self.F_MID.render("共 %d 张" % n, True, TEXT_MUTE)
@@ -250,12 +256,14 @@ class DeckView:
 
         bw = st.get_width() + 22
         bx = x + bw
-        for label, cnt, col in (("数字", n_num, ACCENT), ("图形", n_shape, GREEN)):
-            txt = self.F_SML.render("%s %d" % (label, cnt), True, col)
+        for ctype, cnt in counts.items():
+            if not cnt:
+                continue                      # 没有这一类就不占位置
+            col = card_color(ctype)
+            txt = self.F_SML.render("%s %d" % (type_label(ctype), cnt), True, col)
             w = txt.get_width() + 18
             r = pygame.Rect(bx, y - 4, w, 26)
-            soft = ACCENT_SOFT if col == ACCENT else GREEN_SOFT
-            pygame.draw.rect(screen, soft, r, border_radius=13)
+            pygame.draw.rect(screen, card_soft(ctype), r, border_radius=13)
             pygame.draw.rect(screen, col, r, 1, border_radius=13)
             screen.blit(txt, txt.get_rect(center=r.center))
             bx += w + 8
@@ -310,8 +318,8 @@ class DeckView:
                          pygame.Rect(track.x, y, track.w, h), border_radius=4)
 
     def _draw_mini_card(self, screen, card, r):
-        col = ACCENT if card.ctype == "number" else GREEN
-        soft = ACCENT_SOFT if card.ctype == "number" else GREEN_SOFT
+        col = card_color(card.ctype)
+        soft = card_soft(card.ctype)
 
         pygame.draw.rect(screen, SHADOW, r.move(0, 3), border_radius=9)
         pygame.draw.rect(screen, (255, 255, 255), r, border_radius=9)

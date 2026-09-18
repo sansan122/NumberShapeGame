@@ -29,7 +29,11 @@ import pygame
 import game_env as E
 # 遗物池放在 player.py —— 地图的路线代价也要发遗物，
 # 放在这个模块里的话 map_scene 反过来 import 本模块，绕成一个环。
-from player import RELIC_POOL, roll_unowned_relic   # noqa: F401
+# 卡牌类型的三件套（数字/图形/运算 的主色、浅底、标签）也统一从那里取，
+# 免得战斗、牌组、商店三处各写一套 `number if ... else shape`。
+from player import (RELIC_POOL, roll_unowned_relic,   # noqa: F401
+                    NUMBER_SPECS, SQUARE_SPEC,
+                    card_color, card_soft, type_label)
 
 # ==================== 配色（与地图/战斗统一）====================
 BG          = (246, 245, 240)
@@ -53,46 +57,70 @@ WIDTH, HEIGHT = 1280, 720
 
 
 # ==================== 卡片池（商店/宝箱用）====================
-# 与 test_card.py 的 build_deck 保持同一套命名风格
-CARD_POOL = [
-    ("加一",   "number", 3, "造成 3 点伤害",   1, {"dmg": 3}),
-    ("凑十",   "number", 7, "造成 7 点伤害",   1, {"dmg": 7}),
-    ("平方",   "number", 4, "造成 4 点伤害",   1, {"dmg": 4}),
-    ("开方",   "number", 6, "造成 6 点伤害",   2, {"dmg": 6}),
-    ("三角盾", "shape",  0, "获得 6 点格挡",   1, {"block": 6}),
-    ("方阵",   "shape",  0, "获得 9 点格挡",   2, {"block": 9}),
-    ("镜像",   "shape",  0, "抽 2 张牌",       1, {"draw": 2}),
-    ("归零",   "shape",  0, "清空敌人格挡",    1, {"strip": True}),
+# 数字牌一个个卖：牌组里想要哪个数字就买哪个数字（数字牌的伤害就是它
+# 自己，9 号牌比 1 号牌值钱得多）。0 号牌不进商店 —— 它只值一张手牌，
+# 没人会花金币买。
+# 「平方」也在池子里：它是唯一一张能把数字变成平方的牌（见 battle_scene）。
+CARD_POOL = NUMBER_SPECS[1:] + [
+    SQUARE_SPEC,
+    ("三角盾", "shape", 0, "获得 6 点格挡",   1, {"block": 6}),
+    ("方阵",   "shape", 0, "获得 9 点格挡",   2, {"block": 9}),
+    ("镜像",   "shape", 0, "抽 2 张牌",       1, {"draw": 2}),
+    ("归零",   "shape", 0, "清空敌人格挡",    1, {"strip": True}),
+    ("反证",   "shape", 0, "获得 5 点格挡并造成 4 点伤害", 1,
+     {"block": 5, "dmg": 4}),
+    ("换元",   "shape", 0, "抽 1 张牌并造成 4 点伤害", 1,
+     {"draw": 1, "dmg": 4}),
 ]
 
 #: 遗物池已搬到 player.py（见那边的 RELIC_POOL），这里只留名字导入。
 
 
 def _card_color(ctype):
-    return ACCENT if ctype == "number" else GREEN
+    """卡牌主色（数字蓝 / 图形绿 / 运算紫），统一从 player 那份定义取。"""
+    return card_color(ctype)
 
 
 # ==================== 卡片网格 / 强化 / 卡面（休整点与战利品共用）====================
 CARD_W, CARD_H, CARD_GAP = 132, 176, 16
 
 
-def card_grid_rects(n):
-    """把 n 张卡排成一个居中的网格，返回 rect 列表（n<=0 返回空表）。
+def fit_grid_rects(n, cw, ch, x_gap=16, y_gap=None, top=110, bottom=None):
+    """把 n 个 cw×ch 的格子排成居中的网格，**保证全部落在 top..bottom 之间**。
 
-    一行放得下就单行、位置略低；放不下就折行并整体上移，
-    免得最后一行压到屏幕底部。
+    牌组会越买越大 —— 光数字牌 0~9 就有十张，加上形 / 运算卡，十六七张
+    是常态。所以这里不能只「折行就完事」：行数一多就整体按比例缩小
+    （宽高同步缩，卡面不会变形），而不是让最后一行掉到 y=720 之外 ——
+    那样玩家看得见一半、点不到，还以为是鼠标坏了。
+
+    强化选卡（休整点 / 战利品）和商店的「移除卡牌」都走这一份实现：
+    这三处以前各写了一份折行逻辑，牌组一变就各自算错行高。
     """
+    if bottom is None:
+        bottom = HEIGHT - 80
+    y_gap = x_gap if y_gap is None else y_gap
     if n <= 0:
         return []
-    per_row = max(1, (WIDTH - 120) // (CARD_W + CARD_GAP))
+    per_row = max(1, (WIDTH - 120) // (cw + x_gap))
     rows = max(1, (n + per_row - 1) // per_row)
+    avail = bottom - top
+    h = min(ch, (avail - (rows - 1) * y_gap) // rows)
+    scale = h / float(ch)
+    w = int(cw * scale)
+    x_gap = max(6, int(x_gap * scale))
+    y_gap = max(6, int(y_gap * scale))
     shown = min(per_row, n)
-    x0 = WIDTH // 2 - (shown * (CARD_W + CARD_GAP) - CARD_GAP) // 2
-    y0 = 200 if rows == 1 else 176
-    return [pygame.Rect(x0 + (i % per_row) * (CARD_W + CARD_GAP),
-                        y0 + (i // per_row) * (CARD_H + 14),
-                        CARD_W, CARD_H)
+    x0 = WIDTH // 2 - (shown * w + (shown - 1) * x_gap) // 2
+    grid_h = rows * h + (rows - 1) * y_gap
+    y0 = top + max(0, (avail - grid_h) // 2)      # 在可用带里竖直居中
+    return [pygame.Rect(x0 + (i % per_row) * (w + x_gap),
+                        y0 + (i // per_row) * (h + y_gap), w, h)
             for i in range(n)]
+
+
+def card_grid_rects(n):
+    """强化选卡用的网格（132×176 的大卡）。"""
+    return fit_grid_rects(n, CARD_W, CARD_H, CARD_GAP, 14)
 
 
 def upgrade_card(player, card):
@@ -123,7 +151,11 @@ def upgrade_card(player, card):
 
 
 def draw_card_tile(screen, r, card, hover, f_sml, f_tiny):
-    """画一张「可点选」的卡（强化界面用）。"""
+    """画一张「可点选」的卡（强化 / 移除界面用）。
+
+    纵向尺寸按 r.h 算比例 —— 牌组大的时候 fit_grid_rects() 会整体缩小
+    卡片，这里要是还写死 32 / 52 这些数字，缩下来的卡就会被字画花。
+    """
     col = _card_color(card.ctype)
     r = r.move(0, -10 if hover else 0)
     pygame.draw.rect(screen, (228, 226, 218), r.move(0, 4), border_radius=10)
@@ -131,21 +163,25 @@ def draw_card_tile(screen, r, card, hover, f_sml, f_tiny):
                      border_radius=10)
     pygame.draw.rect(screen, col, r, 3, border_radius=10)
 
-    bar = pygame.Rect(r.x, r.y, r.w, 32)
-    pygame.draw.rect(screen,
-                     ACCENT_SOFT if card.ctype == "number" else GREEN_SOFT,
-                     bar, border_top_left_radius=10, border_top_right_radius=10)
+    bar_h = max(20, int(r.h * 0.18))
+    bar = pygame.Rect(r.x, r.y, r.w, bar_h)
+    pygame.draw.rect(screen, card_soft(card.ctype), bar,
+                     border_top_left_radius=10, border_top_right_radius=10)
 
     nm = f_sml.render(card.name, True, TEXT)
-    screen.blit(nm, nm.get_rect(center=(r.centerx, r.y + 17)))
+    screen.blit(nm, nm.get_rect(center=(r.centerx, r.y + bar_h // 2)))
 
     # 费用
-    pygame.draw.circle(screen, col, (r.x + 18, r.y + 17), 12)
+    cr = max(8, int(bar_h * 0.38))
+    ccx = r.x + cr + 6
+    pygame.draw.circle(screen, col, (ccx, r.y + bar_h // 2), cr)
     cst = f_tiny.render(str(card.cost), True, (255, 255, 255))
-    screen.blit(cst, cst.get_rect(center=(r.x + 18, r.y + 17)))
+    screen.blit(cst, cst.get_rect(center=(ccx, r.y + bar_h // 2)))
 
-    draw_wrapped(screen, card.desc, f_sml, TEXT_MUTE, r.x + 12, r.y + 52,
-                 r.w - 24)
+    # 说明文字：卡片被缩得很小的时候就别画了，挤成一团比不画更难看
+    if r.h >= 130:
+        draw_wrapped(screen, card.desc, f_sml, TEXT_MUTE, r.x + 12,
+                     r.y + bar_h + 16, r.w - 24)
 
 
 # ==================== 面板基类 ====================
@@ -241,20 +277,14 @@ class RestPanel(Panel):
         self.card_rects = []
 
     def ensure_card_layout(self):
-        """进入强化界面时才排布卡片（不然第一帧就会画到屏幕外）。"""
-        cw, ch, gap = 132, 176, 16
-        n = max(1, len(self.cards))
-        # 一行放不下就折行，别硬挤出去
-        per_row = max(1, (WIDTH - 120) // (cw + gap))
-        rows = max(1, (n + per_row - 1) // per_row)
-        shown = min(per_row, n) if n else 1
-        x0 = WIDTH // 2 - (shown * (cw + gap) - gap) // 2
-        self.card_y = 200 if rows == 1 else 176
-        rects = []
-        for i in range(n):
-            row, ci = divmod(i, per_row)
-            rects.append(pygame.Rect(x0 + ci * (cw + gap),
-                                     self.card_y + row * (ch + 14), cw, ch))
+        """进入强化界面时才排布卡片（不然第一帧就会画到屏幕外）。
+
+        布局本身交给 card_grid_rects() —— 早先这里抄了一份「折行」的
+        简化版，牌组一变大（数字牌 0~9 之后十六七张是常态）就算错了行高，
+        第三行直接掉到 y=720 之外。共用一份实现就不会再分叉。
+        """
+        rects = card_grid_rects(len(self.cards))
+        self.card_y = rects[0].y if rects else 200
         self.card_rects = rects
         return rects
 
@@ -353,10 +383,12 @@ class RestPanel(Panel):
             hover = r.collidepoint(mouse)
             self.draw_card(screen, r, c, hover)
 
-        # 提示放在卡片网格正下方（和底部那行 msg 分开，别叠在一起）
+        # 提示放在卡片网格正下方（和底部那行 msg 分开，别叠在一起）。
+        # 网格行数多的时候网格底会往下压，这里夹一下，免得两行字压在一起。
         tip = self.F_SML.render("点击一张卡强化它（数值 +3）", True, TEXT_MUTE)
         grid_bottom = max(r.bottom for r in self.card_rects) if self.card_rects else 400
-        screen.blit(tip, tip.get_rect(center=(WIDTH // 2, grid_bottom + 30)))
+        tip_y = min(grid_bottom + 30, HEIGHT - 62)
+        screen.blit(tip, tip.get_rect(center=(WIDTH // 2, tip_y)))
 
     def draw_card(self, screen, r, card, hover):
         draw_card_tile(screen, r, card, hover, self.F_SML, self.F_TINY)
@@ -395,7 +427,8 @@ class ShopPanel(Panel):
         picks = random.sample(CARD_POOL, 3)
         stock = []
         for name, ctype, value, desc, cost, eff in picks:
-            price = 40 + cost * 20
+            # 数字牌按数字加价 —— 9 号牌一次 9 点伤害，跟 1 号牌一个价说不过去
+            price = 40 + cost * 20 + (value * 4 if ctype == "number" else 0)
             stock.append({"kind": "card", "name": name, "ctype": ctype,
                           "value": value, "desc": desc, "cost": cost,
                           "effect": eff, "price": price, "sold": False})
@@ -517,9 +550,8 @@ class ShopPanel(Panel):
                          3 if hover else 2, border_radius=12)
 
         bar = pygame.Rect(r.x, r.y, r.w, 40)
-        soft = (ACCENT_SOFT if item.get("ctype") == "number" else
-                GREEN_SOFT if item.get("ctype") == "shape" else
-                (238, 237, 254))
+        soft = (card_soft(item.get("ctype")) if item.get("ctype")
+                else (238, 237, 254))
         pygame.draw.rect(screen, soft, bar,
                          border_top_left_radius=12, border_top_right_radius=12)
 
@@ -527,9 +559,9 @@ class ShopPanel(Panel):
                                TEXT_FAINT if sold else TEXT)
         screen.blit(nm, nm.get_rect(center=(r.centerx, r.y + 20)))
 
-        # 类型标签
-        tag = {"number": "数字卡", "shape": "图形卡"}.get(
-            item.get("ctype"), "遗物")
+        # 类型标签（遗物没有 ctype，单独给一个）
+        tag = (type_label(item["ctype"]) + "卡" if item.get("ctype")
+               else "遗物")
         tg = self.F_TINY.render(tag, True, col)
         screen.blit(tg, tg.get_rect(center=(r.centerx, r.y + 58)))
 
@@ -546,21 +578,11 @@ class ShopPanel(Panel):
         screen.blit(pr, pr.get_rect(center=(r.centerx, r.bottom - 28)))
 
     def _layout_remove_cards(self):
-        """排布「选一张卡移除」的网格。"""
+        """排布「选一张卡移除」的网格（小一号的卡，行数多也不会出屏）。"""
         cards = self.player.deck_cards()
         self.cards = cards
-        cw, ch, gap = 110, 148, 14
-        per_row = max(1, (WIDTH - 160) // (cw + gap))
-        rows = max(1, (len(cards) + per_row - 1) // per_row)
-        shown = min(per_row, len(cards)) if cards else 1
-        x0 = WIDTH // 2 - (shown * (cw + gap) - gap) // 2
-        y0 = 170
-        rects = []
-        for i in range(len(cards)):
-            row, ci = divmod(i, per_row)
-            rects.append(pygame.Rect(x0 + ci * (cw + gap),
-                                     y0 + row * (ch + 22), cw, ch))
-        return rects
+        return fit_grid_rects(len(cards), 110, 148, 14, 22,
+                              bottom=HEIGHT - 100)
 
     def draw_pick(self, screen, mouse):
         pygame.draw.rect(screen, PANEL, self.btn_back, border_radius=8)

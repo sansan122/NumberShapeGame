@@ -28,7 +28,8 @@ import pygame
 import game_env as E
 import char_art
 import art_shapes
-from player import Card
+from player import (Card, DIFF_DESC, card_color, card_soft, difficulty_name,
+                    difficulty_tier, type_label)
 
 # ==================== 配色 ====================
 BG          = (246, 245, 240)
@@ -174,22 +175,200 @@ def sieved_card(deck):
                                     + c.effect.get("block", 0))
 
 
-# ==================== 题目（三种题型）====================
+# ==================== 题目（四种题型）====================
 def _darken(col, f=0.78):
     """按钮 hover / 按下时的暗调色（从主色派生，不写死颜色）。"""
     return tuple(int(c * f) for c in col[:3])
 
 
 # 想打出一张卡就得先答题，这是本作的核心。题型和出牌方式一一对应：
-#   数字卡单独打出        -> 算术题（原来的加减乘）
+#   数字卡单独打出        -> 算术题（难度由卡上的数字决定，见下面）
 #   图形卡单独打出        -> 认图形名称（图形卡上没有数字，出算术题无从下手）
 #   数字卡 + 图形卡组合   -> 算图形面积（数字卡上的数就是图形上的边）
+#   数字卡 + 平方组合     -> 算这个数的平方（伤害＝平方）
 #
 # π 取 3：圆面积要能整除，不然「算对」变成一道小数题，小学生直接卡住。
 PI_APPROX = 3
 
 #: 面积题的数值上限：数字卡的值不会超过它（输入框最多 4 位，面积必须装得下）
 MAX_SHAPE_SIDE = 12
+
+#: 组合成功打出省下的能量（两张卡费用之和 − 这个数）。
+#  组合要花两张卡、答一道更难的题，还只占一次出牌机会 —— 不打折没人用。
+COMBO_DISCOUNT = 1
+
+
+def combo_cost(a, b):
+    """一次组合的能量费用：两张卡费用之和 − COMBO_DISCOUNT。
+
+    最低 1 点：组合再便宜也不能变成 0 费白嫖（0 费意味着「反正不要钱，
+    每回合先点一下试试」，出牌的取舍就没了）。
+    """
+    return max(1, a.cost + b.cost - COMBO_DISCOUNT)
+
+
+# ---------- 算术题：难度跟着数字卡的数字走 ----------
+# 数字越大，式子越长、用到的运算越多，9 号牌甚至要带括号。难度阶梯的定义
+# 在 player.DIFF_TIER（卡面标签、题目标题、测试都从那一份读）。
+
+#: 运算优先级 —— 渲染括号时用（"÷" 和 "×" 同级）
+_PREC = {"+": 1, "-": 1, "×": 2, "÷": 2}
+
+
+def _add_pair(rng, lo, hi):
+    """两个正整数相加，和落在 [lo, hi]。"""
+    total = rng.randint(max(2, lo), hi)
+    a = rng.randint(1, total - 1)
+    return a, total - a
+
+
+def _sub_pair(rng, a_lo, a_hi):
+    """a - b，差 ≥ 1：不出负数，也不出 0 这种"算了等于没算"的答案。"""
+    a = rng.randint(max(2, a_lo), a_hi)
+    return a, rng.randint(1, a - 1)
+
+
+def _div_pair(rng, q_lo, q_hi, b_lo=2, b_hi=9):
+    """按「商 × 除数」倒着造被除数 —— 这样除法永远除得尽，答案一定是整数。"""
+    q = rng.randint(q_lo, q_hi)
+    b = rng.randint(b_lo, b_hi)
+    return b * q, b
+
+
+def _build_expr(tier, rng=random):
+    """按难度档造一棵表达式树：(运算符, 左, 右)，叶子是整数。
+
+    为什么造树、不拼字符串：答案用同一棵树递归算（_eval_expr），题面也用
+    同一棵树渲染（_expr_text），**题面和答案不可能对不上**；括号由渲染函数
+    按优先级自动补，不用手写、也不会多算少算。
+
+    所有式子都是「构造保证」的：答案是非负整数、除法整除、不会出现小数和
+    负数。所以这里没有「算完发现不合规就重掷」的兜底 —— 那种兜底在参数
+    极端时会死循环，而这里靠的是取数时就卡住范围。
+    """
+    if tier <= 0:                                  # 最简：一位数加法，和 ≤ 5
+        a, b = _add_pair(rng, 2, 5)
+        return ("+", a, b)
+
+    if tier == 1:                                  # 10 以内加减
+        if rng.random() < 0.6:
+            a, b = _add_pair(rng, 3, 10)
+            return ("+", a, b)
+        a, b = _sub_pair(rng, 4, 10)
+        return ("-", a, b)
+
+    if tier == 2:                                  # 20 以内加减 + 一位数乘法
+        r = rng.random()
+        if r < 0.4:
+            a, b = _add_pair(rng, 8, 20)
+            return ("+", a, b)
+        if r < 0.7:
+            a, b = _sub_pair(rng, 9, 20)
+            return ("-", a, b)
+        return ("×", rng.randint(2, 9), rng.randint(2, 9))
+
+    if tier == 3:                                  # 四则：两位数加减 / 乘 / 整除
+        r = rng.random()
+        if r < 0.3:
+            a, b = _add_pair(rng, 20, 60)
+            return ("+", a, b)
+        if r < 0.55:
+            a, b = _sub_pair(rng, 25, 60)
+            return ("-", a, b)
+        if r < 0.8:
+            return ("×", rng.randint(3, 12), rng.randint(3, 9))
+        a, b = _div_pair(rng, 2, 9)
+        return ("÷", a, b)
+
+    if tier == 4:                                  # 两步四则：先乘除后加减
+        r = rng.random()
+        a, b = rng.randint(3, 9), rng.randint(3, 9)
+        if r < 0.35:
+            return ("+", ("×", a, b), rng.randint(2, 20))
+        if r < 0.6:
+            return ("-", ("×", a, b), rng.randint(2, a * b - 1))
+        d, e = _div_pair(rng, 3, 9, 3, 9)
+        if r < 0.8:
+            return ("+", ("÷", d, e), rng.randint(2, 20))
+        return ("-", ("÷", d, e), rng.randint(1, d // e - 1))
+
+    # tier 5：带括号的两三步式（最难的一档，配 9 号牌）
+    r = rng.random()
+    if r < 0.3:                                    # (a + b) × c
+        a, b = _add_pair(rng, 5, 15)
+        return ("×", ("+", a, b), rng.randint(2, 6))
+    if r < 0.55:                                   # a × (b − c)
+        b = rng.randint(6, 15)
+        return ("×", rng.randint(2, 6), ("-", b, rng.randint(2, b - 2)))
+    if r < 0.8:                                    # (a + b) ÷ c，保证整除
+        c = rng.randint(2, 6)
+        s = c * rng.randint(3, 9)
+        a = rng.randint(1, s - 1)
+        return ("÷", ("+", a, s - a), c)
+    a, b = rng.randint(3, 9), rng.randint(3, 9)    # a × b − (c + d)
+    c, d = _add_pair(rng, 3, max(4, a * b - 2))
+    return ("-", ("×", a, b), ("+", c, d))
+
+
+def _expr_text(node, parent_prec=0, tight=False):
+    """把表达式树渲染成题面文字，按优先级自动补括号。
+
+    parent_prec 是父式子的优先级；tight 表示「这个子式子落在父算子的右边，
+    而父算子是 - 或 ÷」—— 这时同优先级也必须补括号：
+    8 - (2 + 3) 和 8 - 2 + 3 不是一回事。
+    """
+    if isinstance(node, int):
+        return str(node)
+    op, left, right = node
+    prec = _PREC[op]
+    ls = _expr_text(left, prec, False)
+    rs = _expr_text(right, prec, op in ("-", "÷"))
+    text = "%s %s %s" % (ls, op, rs)
+    if prec < parent_prec or (tight and prec == parent_prec):
+        return "(" + text + ")"
+    return text
+
+
+def _eval_expr(node):
+    """算这棵树的值（题面怎么写的，就算成什么 —— 答案的唯一来源）。"""
+    if isinstance(node, int):
+        return node
+    op, left, right = node
+    a, b = _eval_expr(left), _eval_expr(right)
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "×":
+        return a * b
+    return a // b                     # 构造保证整除，不会丢小数
+
+
+def make_arith(tier, rng=random):
+    """出一道算术题，返回 (题面文字, 答案)。测试脚本也用它。"""
+    node = _build_expr(tier, rng)
+    return _expr_text(node), _eval_expr(node)
+
+
+def combo_kind(a, b):
+    """两张卡能不能组合、组合出哪一类题 —— 组合机制的唯一判据。
+
+    返回：
+      "area"   数字 + 图形 -> 算图形面积
+      "square" 数字 + 平方 -> 算这个数的平方
+      None     不能组合（两张同类卡；或者平方配图形 —— 凑不出一对新题面）
+    """
+    types = {a.ctype, b.ctype}
+    if types == {"number", "shape"}:
+        return "area"
+    if types == {"number", "op"}:
+        return "square"
+    return None
+
+
+def is_combo_types(a, b):
+    """老名字（早期只有面积题那一类组合时留下的）：能不能组合。"""
+    return combo_kind(a, b) is not None
 
 
 def roll_shape_dims(shape, v, rng=random):
@@ -238,14 +417,6 @@ def shape_dims_text(shape, dims):
     if shape == "circle":
         return "半径 %g，π 取 %d" % (dims["r"], PI_APPROX)
     return ""
-
-
-def is_combo_types(a, b):
-    """两张卡能不能组合 —— 一数字 + 一图形就是「数形结合」。
-
-    两张都是数字卡 / 都是图形卡不算组合（同一个维度上凑不出一对新题面）。
-    """
-    return {a.ctype, b.ctype} == {"number", "shape"}
 
 
 class BattleScene:
@@ -362,20 +533,22 @@ class BattleScene:
                 self.hand.append(self.deck.pop())
 
     # ==================== 出题 ====================
-    #: 题型 <-> 出牌方式的对应关系（写在卡面上的提示语也从这里来）
+    #: 平方题的示例用哪几个数（示例必须避开本题要算的那个数 —— 否则
+    #  直接把答案摆在例题里了）
+    SQUARE_DEMO_POOL = (2, 3, 4, 5)
+
     def make_quiz(self, card):
-        """算术题 —— 单独打出一张卡时的默认题型。
+        """算术题 —— 单独打出一张数字卡时的题型。
+
+        题目难度由**卡上的数字**决定：0 号牌是一位数加法，9 号牌要算带
+        括号的四则式（台阶见 player.DIFF_TIER）。数字越大打得越疼，
+        题目也越费脑子 —— 手牌里选哪张打，就是在选「做多难的题」。
 
         （保留这个名字：它一直是「单卡出牌」的入口，测试脚本也在调它。）
         """
-        op = random.choice(["+", "×"])
-        if op == "+":
-            a, b = random.randint(3, 12), random.randint(3, 12)
-            ans = a + b
-        else:
-            a, b = random.randint(2, 9), random.randint(2, 9)
-            ans = a * b
-        return {"kind": "arith", "a": a, "b": b, "op": op, "ans": ans,
+        tier = difficulty_tier(card.value)
+        expr, ans = make_arith(tier)
+        return {"kind": "arith", "expr": expr, "ans": ans, "tier": tier,
                 "input": "", "card": card, "cards": [card],
                 "submit_rect": self.BTN_SUBMIT}
 
@@ -392,6 +565,21 @@ class BattleScene:
                 "input": "", "card": number_card,
                 "cards": [number_card, shape_card],
                 "submit_rect": self._area_submit_rect()}
+
+    def make_square_quiz(self, number_card, square_card):
+        """「平方」+ 数字卡的题：先看两个例子，再算这个数的平方。
+
+        例子（2² = 2 × 2 = 4 …）把「平方＝自己乘自己」这条规则讲完，
+        本题要算的就是**数字卡上那个数**的平方。所以这张牌的强弱完全跟着
+        数字卡走：配 9 号牌是 9 × 9 = 81，配 0 号牌还是 0 —— 越小越白给，
+        越大越赚，而题面长度始终只有「乘法」这一档。
+        """
+        n = int(number_card.value)
+        demos = [d for d in self.SQUARE_DEMO_POOL if d != n][:2]
+        return {"kind": "square", "n": n, "ans": n * n, "demos": demos,
+                "input": "", "card": number_card,
+                "cards": [number_card, square_card],
+                "submit_rect": self._square_submit_rect()}
 
     def make_name_quiz(self, shape_card):
         """图形卡单独打出时的题：**认出这是什么图形**（四选一）。
@@ -425,6 +613,11 @@ class BattleScene:
         x0 = box.centerx - total // 2
         return pygame.Rect(x0 + lw + 10 + 130 + 26, row_y, 130, 40)
 
+    def _square_submit_rect(self):
+        """平方题的提交按钮：在例题框和填空行下面居中。"""
+        box = self.QUIZ_BOX_FIG
+        return pygame.Rect(box.centerx - 78, box.y + 330, 156, 46)
+
     def _name_option_rects(self, n):
         """认图形题的选项按钮：两列网格，居中排。"""
         box = self.QUIZ_BOX_FIG
@@ -440,17 +633,15 @@ class BattleScene:
         return out
 
     def submit_quiz(self):
-        """交卷判题。三种题型的对错判定不一样，答对之后的结算也不一样：
-        算术题 / 认图形 -> 单卡结算；面积题 -> 两张卡一起结算。"""
+        """交卷判题。四种题型的对错判定不一样，答对之后的结算也不一样：
+        算术题 / 认图形 -> 单卡结算；面积题 / 平方题 -> 两张卡一起结算。"""
         q = self.quiz
         if q is None:
             return
         kind = q.get("kind", "arith")
-        got = None
 
         if kind == "name":
-            got = q.get("pick")
-            correct = got == q["ans_idx"]
+            correct = q.get("pick") == q["ans_idx"]
         else:
             try:
                 got = int(q["input"]) if q["input"] else None
@@ -460,23 +651,29 @@ class BattleScene:
 
         if correct:
             if kind == "arith":
-                self.log.insert(0, "✓ %d %s %d = %d　算对了！"
-                                % (q["a"], q["op"], q["b"], q["ans"]))
+                self.log.insert(0, "✓ %s = %d　算对了！" % (q["expr"], q["ans"]))
                 self.resolve_card(q["card"])
             elif kind == "area":
                 self.log.insert(0, "✓ 面积 %d　数形结合成立！" % q["ans"])
                 self.resolve_combo(q["cards"][0], q["cards"][1])
+            elif kind == "square":
+                self.log.insert(0, "✓ %d² = %d × %d = %d　平方成立！"
+                                % (q["n"], q["n"], q["n"], q["ans"]))
+                self.resolve_square(q["cards"][0], q["cards"][1])
             else:
                 self.log.insert(0, "✓ 这是%s　认对了！"
                                 % q["options"][q["ans_idx"]])
                 self.resolve_card(q["card"])
         else:
             if kind == "arith":
-                self.log.insert(0, "✗ %d %s %d = %d　算错了，卡牌失效"
-                                % (q["a"], q["op"], q["b"], q["ans"]))
+                self.log.insert(0, "✗ %s = %d　算错了，卡牌失效"
+                                % (q["expr"], q["ans"]))
             elif kind == "area":
                 self.log.insert(0, "✗ 面积算错了（正解 %d）　两张卡一起失效"
                                 % q["ans"])
+            elif kind == "square":
+                self.log.insert(0, "✗ %d 的平方是 %d × %d = %d　两张卡一起失效"
+                                % (q["n"], q["n"], q["n"], q["ans"]))
             else:
                 self.log.insert(0, "✗ 这不是%s　卡牌失效"
                                 % q["options"][q["ans_idx"]])
@@ -498,28 +695,37 @@ class BattleScene:
         self.check_end()
 
     # ==================== 出牌结算 ====================
-    def _settle_card(self, card):
+    def _settle_card(self, card, dmg_override=None):
         """结算一张卡的效果（伤害 / 格挡 / 抽牌 / 清格挡）。
 
-        单卡出牌和组合出牌**都走这里** —— 遗物加成（约等号 / 勾股定理）
-        和角色被动（直感）只有这一份实现，两条路不会算出两套数值。
+        单卡出牌、面积组合、平方组合**都走这里** —— 遗物加成
+        （约等号 / 勾股定理）和角色被动（直感）只有这一份实现，
+        三条路不会算出三套数值。
+
+        dmg_override：把这张卡的基础伤害换成别的数。平方组合用它把
+        「数字卡自己的 9 点」换成「9² = 81」；传 None 就按卡面结算。
         这个方法只管效果，不管弃牌、不管胜负（那是调用方的事）。
         """
         eff = card.effect
+        # 这张牌这次实际能打出的基础伤害：平方组合会把它换成 n²。
+        base = eff.get("dmg", 0) if dmg_override is None else dmg_override
+        # 伤害为 0 的牌**不吃任何伤害加成**（约等号 / 直感）：
+        # 「0² = 0」就该是 0，给一张没有伤害的牌 +1，玩家只会觉得账算不清。
+        has_dmg = base > 0
         bonus = 0
-        if self.player.has_relic("约等号") and "dmg" in eff:
+        if self.player.has_relic("约等号") and has_dmg:
             bonus = 1
         # 演算者【直感】：每回合打出的第一张数字卡伤害 +1。
         # 判定放在这里而不是 submit_quiz —— 算对才叫「打出」，
         # 不然算错一次就把直感白嫖掉了。
         if (self.char_id == "calculator" and card.ctype == "number"
-                and "dmg" in eff and not self.first_number_used):
+                and has_dmg and not self.first_number_used):
             bonus += 1
             self.first_number_used = True
             self.log.insert(0, "「直感」生效：本回合首张数字卡 +1 伤害")
 
-        if "dmg" in eff:
-            dmg = eff["dmg"] + bonus
+        if has_dmg:
+            dmg = base + bonus
             actual = max(0, dmg - self.e_block)
             self.e_block = max(0, self.e_block - dmg)
             self.e_hp -= actual
@@ -567,6 +773,27 @@ class BattleScene:
         self.draw_cards(1)
         self.log.insert(0, "「数形结合」奖励：额外抽 1 张牌")
         for c in (number_card, shape_card):
+            if c in self.hand:
+                self.hand.remove(c)
+            self.discard.append(c)
+        self.check_end()
+
+    def resolve_square(self, number_card, square_card):
+        """「平方」组合生效：数字卡打出的伤害换成**它自己的平方**。
+
+        9 号牌 + 平方 = 81 点伤害（而不是 9 点）——「打出的伤害就是数字牌的
+        平方」说的就是这一句。平方卡自己没有伤害（effect 是空的），所以这里
+        结算出来的那一份伤害只可能来自数字卡，靠 dmg_override 换过去。
+
+        平方组合**不补牌**（面积组合补 1 张）：它的补偿就是那个平方本身 ——
+        9² 顶得上好几张牌，再白送一张手牌就没人愿意老实打数字卡了。
+        """
+        n = int(number_card.value)
+        self._settle_card(number_card, dmg_override=n * n)
+        # 平方卡目前没有自己的效果；照常走一遍结算，是为了以后给它加
+        # 效果（比如「抽 1 张」「额外 +5」）时不用再改这条路径。
+        self._settle_card(square_card)
+        for c in (number_card, square_card):
             if c in self.hand:
                 self.hand.remove(c)
             self.discard.append(c)
@@ -662,24 +889,37 @@ class BattleScene:
         """选中一张卡时的提示语：告诉他下一步能干什么 ——
         这是「组合」这条机制唯一的入口提示，不能省。"""
         if card.ctype == "number":
-            return "已选数字 %d —— 再点图形卡＝组合（算面积题）" % card.value
+            return ("已选数字 %d —— 再点图形卡＝算面积，点「平方」＝算 %d²"
+                    % (card.value, card.value))
+        if card.ctype == "op":
+            return "已选「%s」—— 再点数字卡＝算它的平方" % card.name
         return "已选「%s」—— 再点数字卡＝组合（算面积题）" % card.name
 
     def start_combo(self, card_a, card_b):
-        """把选中的数字卡和图形卡合成一次「数形结合」出牌。
+        """把选中的两张卡合成一次出牌 —— 组合机制**唯一**的入口。
 
-        费用是两张卡之和（组合不是免费的），题目是图形的面积。
+        先问 combo_kind()：数字 + 图形是「数形结合」（算面积），
+        数字 + 平方是「乘方」（算这个数的平方）。费用是两张卡之和
+        **减去 1 点**（组合优惠，见 COMBO_DISCOUNT）—— 组合要花两张卡、
+        答一道更难的题、还只占一次出牌机会，不打折没人肯用。
+
         能量不够就把这次组合挡下来，并且**不改变**已选状态 ——
         玩家可以少选一张，或者结束回合。
         """
+        kind = combo_kind(card_a, card_b)
+        if kind is None:
+            return False
         num = card_a if card_a.ctype == "number" else card_b
-        shp = card_b if card_a.ctype == "number" else card_a
-        cost = num.cost + shp.cost
+        other = card_b if card_a.ctype == "number" else card_a
+        cost = combo_cost(num, other)
         if self.p_energy < cost:
             self.log.insert(0, "能量不足！组合需要 %d 点能量" % cost)
             return False
         self.p_energy -= cost
-        self.quiz = self.make_area_quiz(num, shp)
+        self.log.insert(0, "组合费用 %d 点能量（%d + %d − %d 优惠）"
+                        % (cost, num.cost, other.cost, COMBO_DISCOUNT))
+        self.quiz = (self.make_area_quiz(num, other) if kind == "area"
+                     else self.make_square_quiz(num, other))
         self.clear_selection()
         return True
 
@@ -748,15 +988,14 @@ class BattleScene:
                     if c.selected:
                         self.clear_selection()
                         return None
-                    # 已经选了一张，再点**另一类**的卡 -> 数形结合，
-                    # 这一步就是「组合」本身的入口
+                    # 已经选了一张，再点**能配对的另一类**卡 -> 组合，
+                    # 这一步就是「组合」本身的入口（数字+图形 / 数字+平方）
                     if (self.sel_card is not None and self.sel_card is not c
                             and is_combo_types(self.sel_card, c)):
                         self.start_combo(self.sel_card, c)
                         return None
-                    if self.p_energy < c.cost:
-                        self.log.insert(0, "能量不足！")
-                        return None
+                    # 选中的时候**不查能量** —— 单张贵不代表组合贵（组合是
+                    # 两张之和再减 1）。真花不起的时候，出牌那一步自然会挡。
                     for x in self.hand:
                         x.selected = False
                     c.selected = True
@@ -768,9 +1007,19 @@ class BattleScene:
             # 点空白 = 打出选中的卡
             if self.sel_card:
                 card = self.sel_card
+                # 「平方」这类运算卡不能单独打出：它自己不带任何数值，
+                # 单独出就是把它白白丢掉（玩家一眼看不出为什么没伤害）。
+                if card.ctype == "op":
+                    self.log.insert(0, "「%s」不能单出 —— 要配一张数字卡"
+                                    % card.name)
+                    self.clear_selection()
+                    return None
+                if self.p_energy < card.cost:
+                    self.log.insert(0, "能量不足！")
+                    return None
                 self.p_energy -= card.cost
                 # 图形卡上没有数字，单独打出考「认图形名称」；
-                # 数字卡单独打出考算术。
+                # 数字卡单独打出考算术题（难度看卡上的数字）。
                 if card.ctype == "shape":
                     self.quiz = self.make_name_quiz(card)
                 else:
@@ -1174,14 +1423,14 @@ class BattleScene:
             screen.blit(ht, (WIDTH // 2 - ht.get_width() // 2,
                              HEIGHT - CARD_H - 116))
             sub = self.F_TINY.render(
-                "再点另一类卡 ＝ 组合（面积题）；点空白处 ＝ 单独打出",
+                "再点配得上的卡 ＝ 组合（省 1 点能量）；点空白处 ＝ 单独打出",
                 True, TEXT_MUTE)
             screen.blit(sub, (WIDTH // 2 - sub.get_width() // 2,
                               HEIGHT - CARD_H - 90))
         elif self.phase == "player" and not self.done:
             ht = self.F_TINY.render(
-                "数字卡 + 图形卡 ＝ 组合（算面积）；单出图形卡 ＝ 认图形名称",
-                True, TEXT_MUTE)
+                "数字卡单出＝算术题；数字＋图形＝算面积；数字＋平方＝算平方；"
+                "图形卡单出＝认图形", True, TEXT_MUTE)
             screen.blit(ht, (WIDTH // 2 - ht.get_width() // 2,
                              HEIGHT - CARD_H - 92))
 
@@ -1197,8 +1446,8 @@ class BattleScene:
         r = card.rect
         lift = 18 if card.selected else 0
         r = r.move(0, -lift)
-        col = ACCENT if card.ctype == "number" else GREEN
-        soft = ACCENT_SOFT if card.ctype == "number" else GREEN_SOFT
+        col = card_color(card.ctype)        # 数字 / 图形 / 运算 三色
+        soft = card_soft(card.ctype)
         face = CARD_SEL if card.selected else CARD_FACE
         hover = (not card.selected) and r.collidepoint(mouse)
 
@@ -1218,14 +1467,17 @@ class BattleScene:
         screen.blit(nm, nm.get_rect(center=(r.centerx + 8, r.y + 17)))
 
         # 图案区：卡面中部的几何图案（形状按卡名，颜色随卡类型）。
-        # 以前这块是空的，只有文字，卡面显得很干；图案居中放在
-        # 彩条和类型标签之间，占卡面最大的视觉比重。
+        # 数字牌的图案就是那个数字本身（art_shapes._icon_digit），
+        # 图形 / 运算卡各有各的图形。
         icon_cy = r.y + 71
         art_shapes.draw_card_icon(screen, card.name,
                                   (r.centerx, icon_cy), r.w * 0.46, col)
 
-        # 类型标签
-        tag = "数字" if card.ctype == "number" else "图形"
+        # 类型标签：数字卡后面再挂一个难度名（最简 / 加减 / … / 括号），
+        # 玩家扫一眼卡面就知道「打这张要做多难的题」。
+        tag = type_label(card.ctype)
+        if card.ctype == "number":
+            tag = "%s・%s" % (tag, difficulty_name(card.value))
         tg = self.F_TINY.render(tag, True, col)
         screen.blit(tg, tg.get_rect(center=(r.centerx, r.y + 108)))
 
@@ -1252,8 +1504,22 @@ class BattleScene:
         kind = q.get("kind", "arith")
         if kind == "arith":
             self._draw_arith_quiz(screen, mouse, t_ms, q)
+        elif kind == "square":
+            self._draw_square_quiz(screen, mouse, t_ms, q)
         else:
             self._draw_figure_quiz(screen, mouse, t_ms, q, kind)
+
+    def _fit_font(self, text, max_w):
+        """挑一个能把 text 塞进 max_w 的最大字号。
+
+        算术题的式子长短跟着难度走：0 号牌是「3 + 4」，9 号牌是
+        「9 × 4 − (3 + 5)」—— 固定用大字号的话，难题会顶出答题框。
+        """
+        for size in (34, 28, 22):
+            f = E.load_font(size)
+            if f.size(text)[0] <= max_w:
+                return f
+        return E.load_font(22)
 
     def _draw_typed(self, screen, typed, line_x0, line_x1, line_y, col, t_ms):
         """填空线 + 已输入的内容 + 闪烁光标（数字题和面积题共用）。"""
@@ -1280,18 +1546,28 @@ class BattleScene:
         screen.blit(sb, sb.get_rect(center=r.center))
 
     def _draw_arith_quiz(self, screen, mouse, t_ms, q):
-        """算术题（单出数字卡）：大等式 + 填空线。"""
+        """算术题（单出数字卡）：大等式 + 填空线。
+
+        标题下面挂一行小字写明「这是数字几的题、属于哪一档」——
+        难度是跟着数字卡走的，得让玩家看得见，不然他会以为题目是乱出的。
+        """
         box = self.QUIZ_BOX
         pygame.draw.rect(screen, PANEL, box, border_radius=16)
         pygame.draw.rect(screen, ACCENT, box, 3, border_radius=16)
 
         title = self.F_MID.render("解出这道题，卡牌才会生效", True, TEXT)
-        screen.blit(title, title.get_rect(center=(box.centerx, box.y + 40)))
+        screen.blit(title, title.get_rect(center=(box.centerx, box.y + 38)))
 
-        expr = self.F_BIG.render("%d %s %d =" % (q["a"], q["op"], q["b"]),
-                                 True, ACCENT)
-        expr_y = box.y + 100
+        sub_txt = "数字 %s 的题 · %s" % (q["card"].name,
+                                        DIFF_DESC.get(q.get("tier", 0), ""))
+        sub = self.F_TINY.render(sub_txt, True, TEXT_MUTE)
+        screen.blit(sub, sub.get_rect(center=(box.centerx, box.y + 66)))
+
+        expr_y = box.y + 122
         BLANK_W, GAP = 130, 18
+        expr_txt = q["expr"] + " ="
+        f = self._fit_font(expr_txt, box.w - 60 - BLANK_W - GAP)
+        expr = f.render(expr_txt, True, ACCENT)
         total_w = expr.get_width() + GAP + BLANK_W
         start_x = box.centerx - total_w // 2
         screen.blit(expr, (start_x, expr_y - expr.get_height() // 2))
@@ -1307,6 +1583,57 @@ class BattleScene:
         hint = self.F_TINY.render("直接敲数字键输入，回车提交，退格删除",
                                   True, TEXT_MUTE)
         screen.blit(hint, hint.get_rect(center=(box.centerx, box.bottom - 22)))
+
+    def _draw_square_quiz(self, screen, mouse, t_ms, q):
+        """平方题（数字卡 + 平方卡）：先是「例题框」，再是本题。
+
+        例题必须**完整算出来**（2² = 2 × 2 = 4）：只写「2² = 2 × 2」
+        等于把最后一步也留给玩家猜，那就不叫例题了。本题那一行同样把
+        「n² = n × n =」铺开，玩家要做的只是把乘法算完 —— 这正是
+        「先给示例、再出一道算平方的题」的意思。
+        """
+        box = self.QUIZ_BOX_FIG
+        col = card_color("op")
+        soft = card_soft("op")
+        pygame.draw.rect(screen, PANEL, box, border_radius=16)
+        pygame.draw.rect(screen, col, box, 3, border_radius=16)
+
+        title = self.F_MID.render("平方，就是自己乘自己", True, TEXT)
+        screen.blit(title, title.get_rect(center=(box.centerx, box.y + 36)))
+
+        # 例题框
+        ex = pygame.Rect(box.centerx - 220, box.y + 66, 440, 104)
+        pygame.draw.rect(screen, soft, ex, border_radius=12)
+        pygame.draw.rect(screen, col, ex, 1, border_radius=12)
+        lab = self.F_TINY.render("例", True, col)
+        screen.blit(lab, (ex.x + 16, ex.y + 12))
+        ey = ex.y + 32
+        for d in q["demos"]:
+            line = "%d² = %d × %d = %d" % (d, d, d, d * d)
+            t = self.F_MID.render(line, True, TEXT)
+            screen.blit(t, (ex.x + 52, ey))
+            ey += 32
+
+        # 本题：n² = n × n = ____
+        n = q["n"]
+        n_txt = self.F_BIG.render("%d²  =  %d × %d  =" % (n, n, n), True, col)
+        qw = self.F_BIG.render(str(n * n), True, TEXT).get_width()
+        BLANK_W = max(130, qw + 24)
+        total = n_txt.get_width() + 16 + BLANK_W
+        x0 = box.centerx - total // 2
+        row_y = box.y + 226
+        screen.blit(n_txt, (x0, row_y - n_txt.get_height() // 2))
+
+        line_x0 = x0 + n_txt.get_width() + 16
+        line_x1 = line_x0 + BLANK_W
+        line_y = row_y + 30
+        pygame.draw.line(screen, col, (line_x0, line_y), (line_x1, line_y), 3)
+        self._draw_typed(screen, q["input"], line_x0, line_x1, line_y, col, t_ms)
+
+        self._draw_submit(screen, mouse, q, col)
+        hint = self.F_TINY.render("敲数字键输入结果，回车提交，退格删除",
+                                  True, TEXT_MUTE)
+        screen.blit(hint, hint.get_rect(center=(box.centerx, box.bottom - 20)))
 
     def _draw_figure_quiz(self, screen, mouse, t_ms, q, kind):
         """图形题（组合出的面积题 / 单出图形卡的认图形题）。
